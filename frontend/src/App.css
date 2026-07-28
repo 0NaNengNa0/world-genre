@@ -1,3 +1,31 @@
+.server-status {
+  margin: 0 auto 24px;
+  max-width: 720px;
+  padding: 12px 16px;
+  border-radius: 8px;
+  text-align: center;
+  font-size: 14px;
+  border: 1px solid transparent;
+}
+
+.server-status--loading {
+  color: var(--text-h);
+  background: color-mix(in srgb, var(--accent-bg) 70%, transparent);
+  border-color: var(--accent-border);
+}
+
+.server-status--healthy {
+  color: #166534;
+  background: #dcfce7;
+  border-color: #86efac;
+}
+
+.server-status--unreachable {
+  color: #991b1b;
+  background: #fee2e2;
+  border-color: #fca5a5;
+}
+
 .counter {
   font-size: 16px;
   padding: 5px 10px;

@@ -1,14 +1,46 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import reactLogo from './assets/react.svg'
 import viteLogo from './assets/vite.svg'
 import heroImg from './assets/hero.png'
+import { fetchHealth } from './api/health'
 import './App.css'
+
+type ServerStatus = 'loading' | 'healthy' | 'unreachable'
 
 function App() {
   const [count, setCount] = useState(0)
+  const [serverStatus, setServerStatus] = useState<ServerStatus>('loading')
+  const [serverMessage, setServerMessage] = useState('Checking Python server...')
+
+  useEffect(() => {
+    let cancelled = false
+
+    async function checkHealth() {
+      try {
+        const data = await fetchHealth()
+        if (cancelled) return
+        setServerStatus('healthy')
+        setServerMessage(data.message)
+      } catch {
+        if (cancelled) return
+        setServerStatus('unreachable')
+        setServerMessage('Python server is not reachable. Start it with: uvicorn app.main:app --reload')
+      }
+    }
+
+    void checkHealth()
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   return (
     <>
+      <p className={`server-status server-status--${serverStatus}`} role="status">
+        {serverMessage}
+      </p>
+
       <section id="center">
         <div className="hero">
           <img src={heroImg} className="base" width="170" height="179" alt="" />
