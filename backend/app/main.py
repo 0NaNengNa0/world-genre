@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import health
+from app.api.routes import countries, health
 
 app = FastAPI(title="World Genre API", version="0.1.0")
 
@@ -14,3 +14,4 @@ app.add_middleware(
 )
 
 app.include_router(health.router, prefix="/api")
+app.include_router(countries.router, prefix="/api")

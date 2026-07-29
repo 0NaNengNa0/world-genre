@@ -1,111 +1,192 @@
+/* Design tokens — a single place for colors, spacing, radius, type.
+   Change one variable, the whole app updates. */
 :root {
-  --text: #6b6375;
-  --text-h: #08060d;
-  --bg: #fff;
-  --border: #e5e4e7;
-  --code-bg: #f4f3ec;
-  --accent: #aa3bff;
-  --accent-bg: rgba(170, 59, 255, 0.1);
-  --accent-border: rgba(170, 59, 255, 0.5);
-  --social-bg: rgba(244, 243, 236, 0.5);
-  --shadow:
-    rgba(0, 0, 0, 0.1) 0 10px 15px -3px, rgba(0, 0, 0, 0.05) 0 4px 6px -2px;
+  --bg: #0b0b10;
+  --surface: #15151d;
+  --surface-2: #1e1e2a;
+  --border: #2a2a38;
+  --text: #f1f1f3;
+  --text-muted: #9a9aa8;
+  --accent: #7c5cff;
+  --accent-soft: #7c5cff22;
 
-  --sans: system-ui, 'Segoe UI', Roboto, sans-serif;
-  --heading: system-ui, 'Segoe UI', Roboto, sans-serif;
-  --mono: ui-monospace, Consolas, monospace;
+  --radius: 14px;
+  --radius-sm: 8px;
+  --gap: 1rem;
+  --gap-lg: 2rem;
 
-  font: 18px/145% var(--sans);
-  letter-spacing: 0.18px;
-  color-scheme: light dark;
-  color: var(--text);
-  background: var(--bg);
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+  --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 
-  @media (max-width: 1024px) {
-    font-size: 16px;
-  }
+  color-scheme: dark;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --text: #9ca3af;
-    --text-h: #f3f4f6;
-    --bg: #16171d;
-    --border: #2e303a;
-    --code-bg: #1f2028;
-    --accent: #c084fc;
-    --accent-bg: rgba(192, 132, 252, 0.15);
-    --accent-border: rgba(192, 132, 252, 0.5);
-    --social-bg: rgba(47, 48, 58, 0.5);
-    --shadow:
-      rgba(0, 0, 0, 0.4) 0 10px 15px -3px, rgba(0, 0, 0, 0.25) 0 4px 6px -2px;
-  }
-
-  #social .button-icon {
-    filter: invert(1) brightness(2);
-  }
-}
-
-#root {
-  width: 1126px;
-  max-width: 100%;
-  margin: 0 auto;
-  text-align: center;
-  border-inline: 1px solid var(--border);
-  min-height: 100svh;
-  display: flex;
-  flex-direction: column;
+/* Minimal reset — remove default margins, normalize box model. */
+*,
+*::before,
+*::after {
   box-sizing: border-box;
 }
 
+html,
 body {
   margin: 0;
+  padding: 0;
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 16px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
 }
 
 h1,
-h2 {
-  font-family: var(--heading);
-  font-weight: 500;
-  color: var(--text-h);
-}
-
-h1 {
-  font-size: 56px;
-  letter-spacing: -1.68px;
-  margin: 32px 0;
-  @media (max-width: 1024px) {
-    font-size: 36px;
-    margin: 20px 0;
-  }
-}
-h2 {
-  font-size: 24px;
-  line-height: 118%;
-  letter-spacing: -0.24px;
-  margin: 0 0 8px;
-  @media (max-width: 1024px) {
-    font-size: 20px;
-  }
-}
-p {
+h2,
+h3,
+p,
+ul {
   margin: 0;
 }
 
-code,
-.counter {
-  font-family: var(--mono);
-  display: inline-flex;
-  border-radius: 4px;
-  color: var(--text-h);
+ul {
+  padding: 0;
+  list-style: none;
 }
 
-code {
-  font-size: 15px;
-  line-height: 135%;
-  padding: 4px 8px;
-  background: var(--code-bg);
+/* Layout */
+.page {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 3rem 1.5rem 4rem;
+}
+
+.page__header {
+  margin-bottom: var(--gap-lg);
+}
+
+.page__title {
+  font-size: clamp(2rem, 4vw, 3rem);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.page__subtitle {
+  color: var(--text-muted);
+  margin-top: 0.5rem;
+}
+
+.notice {
+  padding: 1rem 1.25rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-muted);
+}
+
+.notice--error {
+  color: #ff8a8a;
+  border-color: #4a2a2a;
+  background: #2a1515;
+}
+
+/* Grid of country cards */
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: var(--gap);
+}
+
+/* Card */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  transition: border-color 150ms ease, transform 150ms ease;
+}
+
+.card:hover {
+  border-color: var(--accent);
+  transform: translateY(-2px);
+}
+
+.card__cover {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+
+.card__cover-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.card__cover-placeholder {
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(135deg, var(--surface-2), var(--surface));
+}
+
+.card__flag {
+  position: absolute;
+  top: 0.6rem;
+  left: 0.7rem;
+  font-size: 1.6rem;
+  line-height: 1;
+  text-shadow: 0 2px 6px rgba(0, 0, 0, 0.6);
+}
+
+.card__header {
+  padding: 1rem 1.25rem 0;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.85rem;
+}
+
+.card__title {
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+.card__meta {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.card__empty {
+  padding: 0 1.25rem;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.card__artists {
+  padding: 0.75rem 1.25rem 1.25rem;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  border-top: 1px solid var(--border);
+  margin-top: auto;
+}
+
+/* Chips (genre tags) */
+.chips {
+  padding: 0 1.25rem 1.25rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.chip {
+  font-size: 0.75rem;
+  padding: 0.25rem 0.6rem;
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-radius: 999px;
+  font-weight: 500;
 }
