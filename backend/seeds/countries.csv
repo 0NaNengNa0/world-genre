@@ -1,21 +1,21 @@
-lastfm_name,kworb_code
-United States,us
-United Kingdom,gb
-Germany,de
-France,fr
-Brazil,br
-Japan,jp
-South Korea,kr
-Mexico,mx
-India,in
-Canada,ca
-Australia,au
-Sweden,se
-Italy,it
-Spain,es
-Netherlands,nl
-Philippines,ph
-Indonesia,id
-Thailand,th
-Poland,pl
-Turkey,tr
+lastfm_name,kworb_code,country_name
+United States,us,United States
+United Kingdom,gb,United Kingdom
+Germany,de,Germany
+France,fr,France
+Brazil,br,Brazil
+Japan,jp,Japan
+"Korea, Republic of",kr,South Korea
+Mexico,mx,Mexico
+India,in,India
+Canada,ca,Canada
+Australia,au,Australia
+Sweden,se,Sweden
+Italy,it,Italy
+Spain,es,Spain
+Netherlands,nl,Netherlands
+Philippines,ph,Philippines
+Indonesia,id,Indonesia
+Thailand,th,Thailand
+Poland,pl,Poland
+Turkey,tr,Turkey

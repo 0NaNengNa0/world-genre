@@ -141,7 +141,7 @@ def main() -> None:
 
     for country in COUNTRIES:
         code = country["kworb_code"]
-        name = country["lastfm_name"]
+        name = country["country_name"]
 
         artist_names: list[str] = []
         lastfm_path = LASTFM_DIR / f"{code}.json"

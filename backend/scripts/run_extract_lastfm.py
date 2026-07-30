@@ -40,15 +40,15 @@ def main() -> None:
     unique_artists: set[str] = set()
 
     for country in COUNTRIES:
-        name = country["lastfm_name"]
-        print(f"[lastfm] fetching top artists for {name} ...")
+        api_name, code = country["lastfm_name"], country["kworb_code"]
+        print(f"[lastfm] fetching top artists for {country['country_name']} ...")
         # countries.py only ever surfaces the top 5 genres/artists per country,
         # so fetching 50 candidates per country was mostly wasted downstream
         # work - it's what was driving MusicBrainz's ~300-artist queue at
         # ~1 req/sec. 20 still gives plenty of headroom for genre aggregation
         # while roughly halving the MusicBrainz backlog.
-        artists = lastfm.get_top_artists(api_key, name, limit=20)
-        artists_by_country[name] = artists
+        artists = lastfm.get_top_artists(api_key, api_name, limit=20)
+        artists_by_country[code] = artists
         unique_artists.update(a["name"] for a in artists)
 
     print(f"[lastfm] {len(unique_artists)} unique artists across all countries")
@@ -64,11 +64,11 @@ def main() -> None:
                 print(f"  {i}/{len(unique_artists)} artists done")
 
     for country in COUNTRIES:
-        name, code = country["lastfm_name"], country["kworb_code"]
-        artists = artists_by_country[name]
+        code, display_name = country["kworb_code"], country["country_name"]
+        artists = artists_by_country[code]
         tags_by_artist = {a["name"]: tags_cache.get(a["name"], []) for a in artists}
         (OUTPUT_DIR / f"{code}.json").write_text(json.dumps({
-            "country": name,
+            "country": display_name,
             "artists": artists,
             "tags_by_artist": tags_by_artist,
         }, indent=2))

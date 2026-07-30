@@ -19,6 +19,11 @@ Dependency order (matches what each script's own docstring already assumes):
                   data/raw/kworb/*.json            (depends on both)
   deezer       -> prefers data/raw/lastfm/*.json,
                   falls back to data/raw/kworb/*.json  (depends on both)
+  cleanse      -> normalizes genres/artist names and merges the Last.fm +
+                  MusicBrainz genre signals into data/processed/*.json -
+                  see app/services/cleansing.py (depends on kworb, lastfm,
+                  musicbrainz; independent of deezer, which only feeds
+                  images, read directly by app/services/countries.py)
 
 Requires docker-compose.yaml to mount ./app, ./scripts, ./seeds, ./data
 into the containers and PYTHONPATH=/opt/airflow set - both already added.
@@ -69,13 +74,20 @@ def genre_pipeline():
         from scripts.run_extract_deezer import main
         main()
 
+    @task
+    def cleanse():
+        from scripts.run_cleanse import main
+        main()
+
     kworb = extract_kworb()
     lastfm = extract_lastfm()
     musicbrainz = extract_musicbrainz()
     deezer = extract_deezer()
+    cleansed = cleanse()
 
     [kworb, lastfm] >> musicbrainz
     [kworb, lastfm] >> deezer
+    [kworb, lastfm, musicbrainz] >> cleansed
 
 
 genre_pipeline()

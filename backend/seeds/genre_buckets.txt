@@ -1,0 +1,150 @@
+pop
+k-pop
+j-pop
+c-pop
+mandopop
+cantopop
+city pop
+indie pop
+art pop
+synth-pop
+electropop
+dance-pop
+rock
+classic rock
+hard rock
+indie rock
+alternative rock
+alternative
+psychedelic rock
+progressive rock
+post-rock
+shoegaze
+grunge
+britpop
+folk rock
+country rock
+blues rock
+punk
+punk rock
+pop punk
+post-punk
+hardcore punk
+ska punk
+emo
+metal
+heavy metal
+black metal
+death metal
+thrash metal
+doom metal
+power metal
+nu metal
+metalcore
+folk metal
+grindcore
+hip-hop
+trap
+drill
+grime
+boom bap
+gangsta rap
+cloud rap
+r&b
+soul
+neo soul
+funk
+motown
+electronic
+house
+deep house
+techno
+trance
+dubstep
+drum and bass
+jungle
+garage
+electro
+synthwave
+vaporwave
+downtempo
+chillout
+edm
+industrial
+new wave
+hardstyle
+glitch
+ambient
+new age
+drone
+noise
+experimental
+avant-garde
+jazz
+swing
+bebop
+smooth jazz
+free jazz
+fusion
+big band
+latin jazz
+acid jazz
+nu jazz
+blues
+delta blues
+chicago blues
+country
+bluegrass
+americana
+singer-songwriter
+folk
+celtic
+klezmer
+classical
+baroque
+romantic
+opera
+chamber music
+symphony
+choral
+contemporary classical
+reggae
+dancehall
+ska
+dub
+soca
+reggaeton
+latin
+salsa
+merengue
+bachata
+cumbia
+tango
+bossa nova
+samba
+flamenco
+mariachi
+ranchera
+latin pop
+latin trap
+afrobeat
+afrobeats
+highlife
+soukous
+amapiano
+kwaito
+gqom
+bhangra
+qawwali
+hindustani classical
+carnatic classical
+bollywood
+gospel
+christian
+disco
+funk carioca
+world
+spoken word
+soundtrack
+musical theatre
+other

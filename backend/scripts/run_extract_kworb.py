@@ -19,7 +19,7 @@ def main() -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     for country in COUNTRIES:
-        name, code = country["lastfm_name"], country["kworb_code"]
+        name, code = country["country_name"], country["kworb_code"]
         print(f"[kworb] {name} ...")
 
         try:

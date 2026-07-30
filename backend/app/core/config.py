@@ -17,4 +17,27 @@ def load_countries() -> list[dict]:
         return list(csv.DictReader(f))
 
 
+def load_musicbrainz_genres() -> list[str]:
+    """Canonical genre list from scripts/fetch_musicbrainz_genres.py. Returns
+    an empty list if that script hasn't been run yet - callers (cleansing.py)
+    treat an empty list as "fuzzy matching unavailable" and fall back to
+    exact-alias matching only, so nothing breaks before the seed exists."""
+    path = SEEDS_DIR / "musicbrainz_genres.txt"
+    if not path.exists():
+        return []
+    return [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def load_genre_buckets() -> list[str]:
+    """Curated <200-entry broad genre taxonomy (seeds/genre_buckets.txt) -
+    see app/services/genre_buckets.py for the mapping logic that collapses
+    MusicBrainz's ~2,200 fine-grained genres onto these."""
+    path = SEEDS_DIR / "genre_buckets.txt"
+    if not path.exists():
+        return []
+    return [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
 COUNTRIES = load_countries()
+MUSICBRAINZ_GENRES = load_musicbrainz_genres()
+GENRE_BUCKETS = load_genre_buckets()
