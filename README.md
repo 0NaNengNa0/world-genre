@@ -62,7 +62,7 @@ npm install
 
 ```bash
 cd backend
-cp .env.example .env      # then fill in the SPOTIFY_* and LASTFM_API_KEY values
+cp .env.example .env      # then fill in the LASTFM_API_KEY value
 ```
 
 **Mac / Linux / WSL:**
@@ -141,8 +141,9 @@ Useful for debugging a single source before wiring it into a DAG. From `backend/
 
 ```bash
 python -m scripts.run_extract_kworb
-python -m scripts.run_extract_spotify
 python -m scripts.run_extract_lastfm
+python -m scripts.run_extract_musicbrainz
+python -m scripts.run_extract_deezer
 ```
 
 Output lands in `backend/data/raw/<source>/`.
@@ -155,10 +156,10 @@ All secrets live in `backend/.env` (gitignored). Template in `.env.example`.
 
 | Variable                | Used by       | Where to get it                                                    |
 | ----------------------- | ------------- | ------------------------------------------------------------------ |
-| `SPOTIFY_CLIENT_ID`     | Spotify extractor | [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard) |
-| `SPOTIFY_CLIENT_SECRET` | Spotify extractor | same as above                                                  |
 | `LASTFM_API_KEY`        | Last.fm extractor | [last.fm/api/account/create](https://www.last.fm/api/account/create) |
 | `API_HOST`, `API_PORT`  | FastAPI       | defaults are fine                                                  |
+
+MusicBrainz and Deezer need no key. Spotify was dropped as a source (Feb 2026 API lockdown) - `app/services/extractors/spotify.py` and `scripts/run_extract_spotify.py` are unused now, safe to delete.
 
 For Airflow, prefer setting secrets in the Airflow UI (Admin → Variables) over `.env`.
 

@@ -1,7 +1,9 @@
 """Aggregate per-country summaries from raw extractor output.
 
 Primary genre source: Last.fm crowd-sourced tags.
-Secondary: Spotify artist genres (sparse post-2026, used as fallback only).
+Secondary: MusicBrainz genre tags (patchier coverage, used as fallback only).
+Spotify was dropped as a source - it stopped exposing chart/genre data to
+third-party dev-mode apps in Feb 2026 (see extractors/spotify.py, now unused).
 """
 import json
 from collections import Counter
@@ -9,7 +11,7 @@ from collections import Counter
 from app.core.config import COUNTRIES, DATA_DIR
 
 LASTFM_DIR = DATA_DIR / "raw" / "lastfm"
-SPOTIFY_DIR = DATA_DIR / "raw" / "spotify"
+MUSICBRAINZ_DIR = DATA_DIR / "raw" / "musicbrainz"
 DEEZER_ARTISTS_PATH = DATA_DIR / "raw" / "deezer" / "artists.json"
 TOP_N_GENRES = 5
 TOP_N_ARTISTS = 5
@@ -51,8 +53,8 @@ def _from_lastfm(code: str) -> dict | None:
     }
 
 
-def _from_spotify(code: str) -> dict | None:
-    path = SPOTIFY_DIR / f"{code}.json"
+def _from_musicbrainz(code: str) -> dict | None:
+    path = MUSICBRAINZ_DIR / f"{code}.json"
     if not path.exists():
         return None
     payload = json.loads(path.read_text())
@@ -70,7 +72,7 @@ def _from_spotify(code: str) -> dict | None:
 
 
 def _summarize(code: str, name: str) -> dict:
-    data = _from_lastfm(code) or _from_spotify(code) or {
+    data = _from_lastfm(code) or _from_musicbrainz(code) or {
         "artist_count": 0,
         "top_genres": [],
         "top_artists": [],

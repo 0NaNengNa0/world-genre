@@ -1,0 +1,38 @@
+{"timestamp":"2026-07-30T13:09:37.109177Z","level":"info","event":"::group::Pre Execute","logger":"task","filename":"task_runner.py","lineno":2303}
+{"timestamp":"2026-07-30T13:09:37.176339Z","level":"info","event":"DAG bundles loaded: dags-folder, example_dags, apache-airflow-providers-common-sql-example-dags, apache-airflow-providers-standard-example-dags","dag_id":"genre_pipeline","run_id":"manual__2026-07-30T13:09:32.427843+00:00","map_index":-1,"task_id":"extract_kworb","try_number":1,"ti_id":"019fb324-f97e-74ad-a5fe-dfcf94b3d022","logger":"airflow.dag_processing.bundles.manager.DagBundlesManager","filename":"manager.py","lineno":271}
+{"timestamp":"2026-07-30T13:09:37.182994Z","level":"info","event":"Filling up the DagBag from /opt/airflow/dags/genre_pipeline_dag.py","dag_id":"genre_pipeline","run_id":"manual__2026-07-30T13:09:32.427843+00:00","map_index":-1,"task_id":"extract_kworb","try_number":1,"ti_id":"019fb324-f97e-74ad-a5fe-dfcf94b3d022","logger":"airflow.dag_processing.dagbag.BundleDagBag","filename":"dagbag.py","lineno":460}
+{"timestamp":"2026-07-30T13:09:37.215461Z","level":"warning","event":"The `airflow.decorators.dag` attribute is deprecated. Please use `'airflow.sdk.dag'`.","category":"UserWarning","filename":"/opt/airflow/dags/genre_pipeline_dag.py","lineno":31,"dag_id":"genre_pipeline","run_id":"manual__2026-07-30T13:09:32.427843+00:00","map_index":-1,"task_id":"extract_kworb","try_number":1,"ti_id":"019fb324-f97e-74ad-a5fe-dfcf94b3d022","logger":"py.warnings"}
+{"timestamp":"2026-07-30T13:09:37.215721Z","level":"warning","event":"The `airflow.decorators.task` attribute is deprecated. Please use `'airflow.sdk.task'`.","category":"UserWarning","filename":"/opt/airflow/dags/genre_pipeline_dag.py","lineno":31,"dag_id":"genre_pipeline","run_id":"manual__2026-07-30T13:09:32.427843+00:00","map_index":-1,"task_id":"extract_kworb","try_number":1,"ti_id":"019fb324-f97e-74ad-a5fe-dfcf94b3d022","logger":"py.warnings"}
+{"timestamp":"2026-07-30T13:09:37.218221Z","level":"info","event":"Worker startup parse complete","bundle_name":"dags-folder","bundle_version":null,"dag_file":"genre_pipeline_dag.py","dag_id":"genre_pipeline","bundle_prepare_ms":8,"dag_file_parse_ms":35,"run_id":"manual__2026-07-30T13:09:32.427843+00:00","map_index":-1,"task_id":"extract_kworb","try_number":1,"ti_id":"019fb324-f97e-74ad-a5fe-dfcf94b3d022","logger":"task","filename":"task_runner.py","lineno":1062}
+{"timestamp":"2026-07-30T13:09:37.266193Z","level":"info","event":"Task instance is in running state","logger":"task.stdout"}
+{"timestamp":"2026-07-30T13:09:37.266821Z","level":"info","event":" Previous state of the Task instance: TaskInstanceState.QUEUED","logger":"task.stdout"}
+{"timestamp":"2026-07-30T13:09:37.267752Z","level":"info","event":"Current task name:extract_kworb","logger":"task.stdout"}
+{"timestamp":"2026-07-30T13:09:37.268366Z","level":"info","event":"Dag name:genre_pipeline","logger":"task.stdout"}
+{"timestamp":"2026-07-30T13:09:37.266447Z","level":"info","event":"::endgroup::","dag_id":"genre_pipeline","run_id":"manual__2026-07-30T13:09:32.427843+00:00","map_index":-1,"task_id":"extract_kworb","try_number":1,"ti_id":"019fb324-f97e-74ad-a5fe-dfcf94b3d022","logger":"task","filename":"task_runner.py","lineno":2107}
+{"timestamp":"2026-07-30T13:09:37.777529Z","level":"info","event":"[kworb] United States ...","logger":"task.stdout"}
+{"timestamp":"2026-07-30T13:09:41.301121Z","level":"info","event":"[kworb] United Kingdom ...","logger":"task.stdout"}
+{"timestamp":"2026-07-30T13:09:44.073767Z","level":"info","event":"[kworb] Germany ...","logger":"task.stdout"}
+{"timestamp":"2026-07-30T13:09:46.766293Z","level":"info","event":"[kworb] France ...","logger":"task.stdout"}
+{"timestamp":"2026-07-30T13:09:49.466602Z","level":"info","event":"[kworb] Brazil ...","logger":"task.stdout"}
+{"timestamp":"2026-07-30T13:09:52.390983Z","level":"info","event":"[kworb] Japan ...","logger":"task.stdout"}
+{"timestamp":"2026-07-30T13:09:55.083201Z","level":"info","event":"[kworb] South Korea ...","logger":"task.stdout"}
+{"timestamp":"2026-07-30T13:09:57.794778Z","level":"info","event":"[kworb] Mexico ...","logger":"task.stdout"}
+{"timestamp":"2026-07-30T13:10:00.485462Z","level":"info","event":"[kworb] India ...","logger":"task.stdout"}
+{"timestamp":"2026-07-30T13:10:03.403933Z","level":"info","event":"[kworb] Canada ...","logger":"task.stdout"}
+{"timestamp":"2026-07-30T13:10:06.080202Z","level":"info","event":"[kworb] Australia ...","logger":"task.stdout"}
+{"timestamp":"2026-07-30T13:10:08.803435Z","level":"info","event":"[kworb] Sweden ...","logger":"task.stdout"}
+{"timestamp":"2026-07-30T13:10:11.505448Z","level":"info","event":"[kworb] Italy ...","logger":"task.stdout"}
+{"timestamp":"2026-07-30T13:10:14.570844Z","level":"info","event":"[kworb] Spain ...","logger":"task.stdout"}
+{"timestamp":"2026-07-30T13:10:17.240772Z","level":"info","event":"[kworb] Netherlands ...","logger":"task.stdout"}
+{"timestamp":"2026-07-30T13:10:19.936994Z","level":"info","event":"[kworb] Philippines ...","logger":"task.stdout"}
+{"timestamp":"2026-07-30T13:10:22.606209Z","level":"info","event":"[kworb] Indonesia ...","logger":"task.stdout"}
+{"timestamp":"2026-07-30T13:10:25.350589Z","level":"info","event":"[kworb] Thailand ...","logger":"task.stdout"}
+{"timestamp":"2026-07-30T13:10:28.007679Z","level":"info","event":"[kworb] Poland ...","logger":"task.stdout"}
+{"timestamp":"2026-07-30T13:10:30.724950Z","level":"info","event":"[kworb] Turkey ...","logger":"task.stdout"}
+{"timestamp":"2026-07-30T13:10:33.426259Z","level":"info","event":"Done. Raw files in /opt/airflow/data/raw/kworb","logger":"task.stdout"}
+{"timestamp":"2026-07-30T13:10:33.428794Z","level":"info","event":"Done. Returned value was: None","dag_id":"genre_pipeline","run_id":"manual__2026-07-30T13:09:32.427843+00:00","map_index":-1,"task_id":"extract_kworb","try_number":1,"ti_id":"019fb324-f97e-74ad-a5fe-dfcf94b3d022","logger":"airflow.task.operators.airflow.providers.standard.decorators.python._PythonDecoratedOperator","filename":"python.py","lineno":233}
+{"timestamp":"2026-07-30T13:10:33.431347Z","level":"info","event":"::group::Post Execute","dag_id":"genre_pipeline","run_id":"manual__2026-07-30T13:09:32.427843+00:00","map_index":-1,"task_id":"extract_kworb","try_number":1,"ti_id":"019fb324-f97e-74ad-a5fe-dfcf94b3d022","logger":"task","filename":"task_runner.py","lineno":1577}
+{"timestamp":"2026-07-30T13:10:33.492090Z","level":"info","event":"Task instance in success state","logger":"task.stdout"}
+{"timestamp":"2026-07-30T13:10:33.493154Z","level":"info","event":" Previous state of the Task instance: TaskInstanceState.RUNNING","logger":"task.stdout"}
+{"timestamp":"2026-07-30T13:10:33.495260Z","level":"info","event":"Task operator:<Task(_PythonDecoratedOperator): extract_kworb>","logger":"task.stdout"}
+{"timestamp":"2026-07-30T13:10:33.495609Z","level":"info","event":"::endgroup::","dag_id":"genre_pipeline","run_id":"manual__2026-07-30T13:09:32.427843+00:00","map_index":-1,"task_id":"extract_kworb","try_number":1,"ti_id":"019fb324-f97e-74ad-a5fe-dfcf94b3d022","logger":"task","filename":"task_runner.py","lineno":2270}

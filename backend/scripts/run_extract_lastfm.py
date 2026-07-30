@@ -42,7 +42,12 @@ def main() -> None:
     for country in COUNTRIES:
         name = country["lastfm_name"]
         print(f"[lastfm] fetching top artists for {name} ...")
-        artists = lastfm.get_top_artists(api_key, name)
+        # countries.py only ever surfaces the top 5 genres/artists per country,
+        # so fetching 50 candidates per country was mostly wasted downstream
+        # work - it's what was driving MusicBrainz's ~300-artist queue at
+        # ~1 req/sec. 20 still gives plenty of headroom for genre aggregation
+        # while roughly halving the MusicBrainz backlog.
+        artists = lastfm.get_top_artists(api_key, name, limit=20)
         artists_by_country[name] = artists
         unique_artists.update(a["name"] for a in artists)
 
