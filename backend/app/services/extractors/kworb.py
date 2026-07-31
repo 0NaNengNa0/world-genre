@@ -17,7 +17,7 @@ def scrape_country_chart(code: str, timeout: int = 15) -> list[list[str]]:
     resp = requests.get(BASE_URL.format(code=code), headers=HEADERS, timeout=timeout)
     resp.raise_for_status()
 
-    soup = BeautifulSoup(resp.text, "lxml")
+    soup = BeautifulSoup(resp.content, "lxml")
     table = soup.find("table")
     if table is None:
         return []

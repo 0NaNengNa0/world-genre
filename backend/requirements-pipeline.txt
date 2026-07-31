@@ -1,0 +1,10 @@
+# Extractors + cleansing. Installed into the Airflow image (see Dockerfile)
+# and locally. Kept separate from the API deps because FastAPI/uvicorn/pydantic
+# would collide with the versions Airflow pins internally.
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+# Never imported directly - bs4 loads it by name from BeautifulSoup(..., "lxml").
+# Removing it breaks the kworb scraper at runtime, not at import.
+lxml>=5.0.0
+python-dotenv>=1.0.0
+rapidfuzz>=3.9.0

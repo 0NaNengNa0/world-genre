@@ -1,18 +1,8 @@
 """
-Orchestrates the extract scripts that already live in backend/scripts/.
-No logic is duplicated here - each task just calls that script's existing
-main(). This replaces run_extract_kworb.py / run_extract_lastfm.py /
-run_extract_deezer.py that were sitting in this folder as exact copies of
-the scripts/ versions - those aren't real DAGs (no DAG object in them), so
-Airflow was never picking them up anyway. Harmless to leave in place, or
-delete manually whenever you like.
+Orchestrates the extract scripts in backend/scripts/. Each task just calls
+that script's existing main() - no logic is duplicated here.
 
-Spotify has been dropped as a source (it stopped exposing chart/genre data
-to third-party dev-mode apps in Feb 2026) and replaced with MusicBrainz -
-see scripts/run_extract_musicbrainz.py and app/services/extractors/spotify.py
-(now unused, safe to delete manually).
-
-Dependency order (matches what each script's own docstring already assumes):
+Dependency order:
   kworb        -> no deps, writes data/raw/kworb/*.json
   lastfm       -> no deps, writes data/raw/lastfm/*.json
   musicbrainz  -> prefers data/raw/lastfm/*.json (mbids), falls back to

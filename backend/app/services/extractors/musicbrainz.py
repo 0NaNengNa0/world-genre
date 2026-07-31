@@ -1,10 +1,5 @@
 """Look up canonical genre tags for artists via the MusicBrainz API.
 
-Replaces the Spotify enrichment step (Spotify stopped exposing chart/genre
-data to third-party dev-mode apps in Feb 2026 - see extractors/spotify.py,
-now unused). MusicBrainz needs no account, no key, and has no daily quota,
-just a strict rate limit and a required User-Agent.
-
 Auth: none. Rate limit: ~1 request/second per IP, strictly enforced, and
 requests without a descriptive User-Agent (app name + contact) get blocked.
 See https://musicbrainz.org/doc/MusicBrainz_API/Rate_Limiting
