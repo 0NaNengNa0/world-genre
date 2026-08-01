@@ -1,0 +1,4 @@
+# Local dev + CI only. Never installed into the Airflow containers or
+# needed at runtime - just for running the test suite and linter.
+pytest>=8.0.0
+ruff>=0.6.0

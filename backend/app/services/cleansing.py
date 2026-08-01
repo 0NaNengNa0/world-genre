@@ -55,8 +55,15 @@ GENRE_ALIASES = {
 
 # Splits a chart-row artist label on the first collaborator marker, so
 # "Drake feat. Rihanna" or "A & B" resolve to one headline artist ("Drake",
-# "A") instead of a mangled multi-artist string.
-FEATURE_SPLIT_RE = re.compile(r"\s+(feat\.?|ft\.?|featuring|with|&|,|/|x)\s+", re.IGNORECASE)
+# "A") instead of a mangled multi-artist string. Word-ish markers (feat/ft/
+# featuring/with/&/x) require whitespace on both sides so "x" doesn't match
+# mid-word (e.g. "Xzibit"); commas don't need that guard - a bare comma
+# never appears inside an artist name, and real chart-row credits are far
+# more often written "A, B, C" (no space before the comma) than "A , B" -
+# a stricter comma rule used to silently fail to split that common case.
+FEATURE_SPLIT_RE = re.compile(
+    r"\s+(?:feat\.?|ft\.?|featuring|with|&|/|x)\s+|\s*,\s*", re.IGNORECASE
+)
 
 LASTFM_WEIGHT_DIVISOR = 20  # Last.fm tag counts run roughly 0-100
 
@@ -126,6 +133,7 @@ def merge_genre_signals(
     lastfm_tags_by_artist: dict[str, list[dict]],
     musicbrainz_genres_by_artist: dict[str, list[str]],
     top_n: int = 5,
+    stats: dict | None = None,
 ) -> list[dict]:
     """Reconciles two independent genre signals into one ranked list -
     this is the real cross-source cleansing step, not just a fallback.
@@ -143,20 +151,35 @@ def merge_genre_signals(
     20 countries, instead of staying 2,000+ fine-grained MusicBrainz labels
     that would never overlap between two countries at all.
 
+    If `stats` is passed, it's mutated in place with
+    {"total_tags", "unclassified_tags", "unclassified_rate"} - how many raw
+    tags this call saw, and what fraction were junk/empty (normalize_genre
+    returned None) or fell through to the "other" bucket. Without this, a
+    genuine data-quality regression (e.g. a source starts returning garbage
+    tags, or the bucket taxonomy stops covering what a country actually
+    listens to) would be invisible - the pipeline would keep "succeeding"
+    while silently discarding more and more signal. Optional and additive
+    so existing callers that don't pass it see no behavior change.
+
     Returns [{"genre": str, "score": int, "sources": list[str]}, ...],
     highest score first.
     """
     scores: Counter[str] = Counter()
     sources: dict[str, set[str]] = {}
+    total_tags = 0
+    unclassified_tags = 0
 
     for tags in lastfm_tags_by_artist.values():
         for tag in tags[:5]:
+            total_tags += 1
             raw_name = tag.get("name") if isinstance(tag, dict) else None
             name = normalize_genre(raw_name)
             if not name:
+                unclassified_tags += 1
                 continue
             name = bucket_genre(name)
             if name == "other":
+                unclassified_tags += 1
                 continue  # unclassifiable - shouldn't compete for a top-5 slot
             weight = 1
             try:
@@ -168,14 +191,24 @@ def merge_genre_signals(
 
     for genres in musicbrainz_genres_by_artist.values():
         for raw_name in genres:
+            total_tags += 1
             name = normalize_genre(raw_name)
             if not name:
+                unclassified_tags += 1
                 continue
             name = bucket_genre(name)
             if name == "other":
+                unclassified_tags += 1
                 continue
             scores[name] += 1
             sources.setdefault(name, set()).add("musicbrainz")
+
+    if stats is not None:
+        stats["total_tags"] = total_tags
+        stats["unclassified_tags"] = unclassified_tags
+        stats["unclassified_rate"] = (
+            round(unclassified_tags / total_tags, 4) if total_tags else 0.0
+        )
 
     return [
         {"genre": genre, "score": score, "sources": sorted(sources[genre])}

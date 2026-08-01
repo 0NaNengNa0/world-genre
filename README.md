@@ -33,10 +33,14 @@ world-genre/
     ├── scripts/                 # runnable entrypoints (dev / debug / Airflow tasks)
     ├── dags/
     │   └── genre_pipeline_dag.py
-    ├── data/                    # gitignored: raw/ (per source) + processed/ (cleansed)
+    ├── tests/                   # pytest - see Testing section below
+    ├── data/                    # gitignored: raw/, processed/ (latest + history/ + quality report)
     ├── docker-compose.yaml      # Airflow stack
+    ├── ruff.toml
     ├── .env.example
     └── requirements.txt
+├── .github/workflows/
+│   └── backend-ci.yml           # lint + test on every backend push/PR
 ```
 
 ---
@@ -175,6 +179,15 @@ The cleanse step (`app/services/cleansing.py`) does three things the raw extract
 
 Spotify was dropped as a source entirely (it stopped exposing chart/genre data to third-party dev-mode apps in Feb 2026) — `app/services/extractors/spotify.py` and `scripts/run_extract_spotify.py` are unused, safe to delete.
 
+### Data quality report + history
+
+Every `run_cleanse.py` run also writes:
+
+- `data/processed/_quality_report.json` — per-country artist counts and genre-tag "unclassified rate" (the % of raw tags that were junk, or didn't map onto any bucket including the `"other"` catch-all), plus a summary flagging any country with zero artists or an unusually high unclassified rate. This is what would have caught the South Korea empty-data bug automatically instead of it needing to be spotted by eye.
+- `data/processed/history/{code}/{date}.json` — a dated snapshot alongside the "latest" file the API reads, so genre trends are reconstructable over time instead of only ever having a single point-in-time view.
+
+Both are gitignored (same as the rest of `data/processed/`) since they're generated output, not source.
+
 ### Running it manually (without Airflow)
 
 ```bash
@@ -194,6 +207,21 @@ kworb ──┬──> deezer ────────┘
 lastfm ─┘
 ```
 `kworb` and `lastfm` run in parallel with no dependencies; `musicbrainz` and `deezer` each need both (Last.fm for artist MBIDs/names, kworb as fallback); `cleanse` waits on `kworb`, `lastfm`, and `musicbrainz` (not `deezer`, which only feeds cover images, read directly by `app/services/countries.py`).
+
+---
+
+## Testing + CI
+
+```bash
+cd backend
+pip install -r requirements-dev.txt   # pytest + ruff, dev-only
+pytest -v
+ruff check .
+```
+
+Tests live in `backend/tests/` and cover the pure-function core of the cleansing pipeline (`app/services/cleansing.py`, `app/services/genre_buckets.py`) against the real seed data, not mocks — genre normalization only matters insofar as it handles real messy text, so the tests run against the actual ~2,200-genre MusicBrainz list and the actual 150-entry bucket taxonomy this project ships with.
+
+`.github/workflows/backend-ci.yml` runs both on every push/PR that touches `backend/` — lint first, then tests, same commands as above.
 
 ---
 

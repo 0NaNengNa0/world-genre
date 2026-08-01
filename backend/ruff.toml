@@ -1,0 +1,16 @@
+# Pinned explicitly (rather than relying on ruff's "default" rule set,
+# which has changed between versions) so CI and local runs always check
+# the same things: pyflakes (F), pycodestyle errors/warnings (E/W), import
+# sort order (I).
+#
+# EXE002 (file is executable but has no shebang) is ignored - the
+# executable bit on these files is a filesystem/mount artifact from how
+# this repo has been edited across machines, not a signal that any of
+# them are meant to be run directly via `./script.py`. Everything here is
+# run via `python -m scripts.xyz`.
+line-length = 100
+extend-exclude = ["logs", "plugins", "config", ".venv"]
+
+[lint]
+select = ["E", "F", "I", "W"]
+ignore = ["EXE002"]

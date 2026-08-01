@@ -10,7 +10,6 @@ Run from the backend/ directory:
 """
 import hashlib
 import json
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
