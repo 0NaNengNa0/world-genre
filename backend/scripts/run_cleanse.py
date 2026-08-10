@@ -48,7 +48,16 @@ OUTPUT_DIR = DATA_DIR / "processed"
 HISTORY_DIR = OUTPUT_DIR / "history"
 QUALITY_REPORT_PATH = OUTPUT_DIR / "_quality_report.json"
 
-TOP_N_ARTISTS = 5
+# How much to PERSIST per country. Deliberately deeper than any single view
+# shows: the grid renders 5 and the country detail view 100 artists / 10
+# genres, and re-running the pipeline to recover a number that was truncated
+# at write time is expensive (MusicBrainz is ~1 req/sec). Storing the full
+# depth once and limiting per-query in SQL is much cheaper than the reverse.
+TOP_N_ARTISTS = 100  # matches run_extract_lastfm's per-country sample depth
+# Genres are stored in full (no cap): a country only has ~30-40 after
+# bucketing, so the whole distribution is a few thousand rows across all 76
+# countries - and percentage share is only correct when divided by the real
+# total rather than a truncated one.
 
 # Above this unclassified-tag rate, a country's run is flagged in the
 # quality report summary - not a hard failure, just a "look at this" signal.
@@ -68,22 +77,36 @@ def _artists_from_lastfm(payload: dict) -> list[str]:
 
 def _artists_from_kworb(payload: dict) -> list[str]:
     """Fallback path for countries with no Last.fm data - parses + cleanses
-    artist names straight out of the raw chart rows."""
+    artist names straight out of the raw chart rows.
+
+    Row parsing is shared with run_extract_musicbrainz.py via
+    cleansing.parse_artist_from_chart_row; this used to have its own copy
+    that only split on " - ", so rows written without spaces around the dash
+    ("BTS-NORMAL") survived intact here while the MusicBrainz extractor
+    split them correctly - the two paths disagreed about the same row.
+    """
     seen: set[str] = set()
     ordered: list[str] = []
     for row in payload.get("rows", []):
         if len(row) < 3:
             continue
-        raw = row[2].split(" - ", 1)[0] if " - " in row[2] else row[2]
-        name = cleansing.normalize_artist_name(raw)
+        name = cleansing.normalize_artist_name(
+            cleansing.parse_artist_from_chart_row(row[2])
+        )
         if name and name not in seen:
             seen.add(name)
             ordered.append(name)
     return ordered
 
 
-def _process_country(country: dict) -> tuple[dict, dict]:
-    """Returns (processed_record, quality_stats) for one country."""
+def _process_country(country: dict) -> tuple[dict, dict, list[dict]]:
+    """Pass 1 for a single country.
+
+    Returns (partial_record, quality_stats, full_genre_distribution). The
+    record is deliberately incomplete - genre ranking can't be finished
+    until every country has been read, because distinctiveness is defined
+    relative to the others (see main()).
+    """
     code, name = country["kworb_code"], country["country_name"]
 
     lastfm = _load(LASTFM_DIR / f"{code}.json")
@@ -91,10 +114,11 @@ def _process_country(country: dict) -> tuple[dict, dict]:
     kworb = _load(KWORB_DIR / f"{code}.json")
 
     genre_stats: dict = {}
-    top_genres = cleansing.merge_genre_signals(
+    # No top_n - the full distribution is needed so pass 2 can rank the long
+    # tail, where the genres that actually differentiate countries live.
+    all_genres = cleansing.merge_genre_signals(
         lastfm.get("tags_by_artist", {}),
         musicbrainz.get("genres_by_artist", {}),
-        top_n=TOP_N_ARTISTS,
         stats=genre_stats,
     )
 
@@ -105,15 +129,15 @@ def _process_country(country: dict) -> tuple[dict, dict]:
         "country_name": name,
         "artist_count": len(artist_names),
         "top_artists": artist_names[:TOP_N_ARTISTS],
-        "top_genres": top_genres,
     }
     stats = {
         "artist_count": len(artist_names),
         "total_genre_tags": genre_stats.get("total_tags", 0),
         "unclassified_genre_tags": genre_stats.get("unclassified_tags", 0),
         "unclassified_rate": genre_stats.get("unclassified_rate", 0.0),
+        "distinct_genres": len(all_genres),
     }
-    return record, stats
+    return record, stats, all_genres
 
 
 def _write_quality_report(per_country_stats: dict[str, dict]) -> None:
@@ -176,17 +200,16 @@ def main() -> None:
     today = datetime.now(timezone.utc).date().isoformat()
 
     per_country_stats: dict[str, dict] = {}
+    records: dict[str, dict] = {}
+    genres_by_country: dict[str, list[dict]] = {}
 
+    # --- Pass 1: read every country, build its full genre distribution ---
     for country in COUNTRIES:
         code = country["kworb_code"]
-        record, stats = _process_country(country)
+        record, stats, all_genres = _process_country(country)
         per_country_stats[code] = stats
-
-        (OUTPUT_DIR / f"{code}.json").write_text(json.dumps(record, indent=2))
-
-        history_dir = HISTORY_DIR / code
-        history_dir.mkdir(parents=True, exist_ok=True)
-        (history_dir / f"{today}.json").write_text(json.dumps(record, indent=2))
+        records[code] = record
+        genres_by_country[code] = all_genres
 
         if stats["artist_count"] == 0:
             logger.warning("%s: no artists resolved", code)
@@ -196,11 +219,49 @@ def main() -> None:
             )
         else:
             logger.info(
-                "%s: %d artists, %.0f%% genre tags unclassified",
+                "%s: %d artists, %d genres, %.0f%% tags unclassified",
                 code,
                 stats["artist_count"],
+                stats["distinct_genres"],
                 stats["unclassified_rate"] * 100,
             )
+
+    # --- Pass 2: score each country against the others, then write ---
+    # Only countries that produced genres count toward the denominator -
+    # including empty ones would inflate total_countries and understate every
+    # genre's document frequency, making everything look more distinctive
+    # than it is.
+    contributing = {c: rows for c, rows in genres_by_country.items() if rows}
+    document_frequency = cleansing.genre_document_frequency(contributing)
+    total_countries = len(contributing)
+    logger.info(
+        "Scoring distinctiveness across %d countries with genre data", total_countries
+    )
+
+    for code, record in records.items():
+        ranked = cleansing.score_distinctiveness(
+            genres_by_country[code], document_frequency, total_countries
+        )
+        # Two views of the same data: what they listen to, and what sets them
+        # apart. Popularity alone is near-identical everywhere (pop/rock top
+        # almost every country), so keeping only it would hide the whole point
+        # - and keeping only distinctiveness would misrepresent what's
+        # actually played.
+        # One list holding every genre with BOTH scores, rather than two
+        # pre-truncated top-N lists. Two reasons:
+        #  - percentage share (the detail view's pie chart) has to divide by
+        #    the true total across all genres; dividing by a truncated total
+        #    silently inflates every slice.
+        #  - "top 5 by popularity" and "top 10 by distinctiveness" then differ
+        #    only by an ORDER BY / LIMIT in SQL, instead of being baked in
+        #    here where changing a view means re-running the whole pipeline.
+        record["genres"] = sorted(ranked, key=lambda r: r["score"], reverse=True)
+
+        (OUTPUT_DIR / f"{code}.json").write_text(json.dumps(record, indent=2))
+
+        history_dir = HISTORY_DIR / code
+        history_dir.mkdir(parents=True, exist_ok=True)
+        (history_dir / f"{today}.json").write_text(json.dumps(record, indent=2))
 
     _write_quality_report(per_country_stats)
     logger.info("Done. Cleansed data in %s", OUTPUT_DIR.resolve())

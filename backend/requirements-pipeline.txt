@@ -1,6 +1,12 @@
-# Extractors + cleansing. Installed into the Airflow image (see Dockerfile)
-# and locally. Kept separate from the API deps because FastAPI/uvicorn/pydantic
-# would collide with the versions Airflow pins internally.
+# Extractors, cleansing, and the Postgres load step - i.e. everything the
+# Airflow tasks need. This is the ONLY requirements file installed into the
+# Airflow image (see Dockerfile); the API's deps deliberately stay out of it,
+# because Airflow 3 ships its own FastAPI/pydantic and pinning different
+# versions alongside them breaks the Airflow api-server.
+#
+# For local development you usually want requirements.txt instead, which
+# pulls this in plus the API deps.
+psycopg2-binary>=2.9.9
 requests>=2.31.0
 beautifulsoup4>=4.12.0
 # Never imported directly - bs4 loads it by name from BeautifulSoup(..., "lxml").

@@ -27,6 +27,7 @@ import time
 import requests
 
 from app.core.config import COUNTRIES, DATA_DIR
+from app.services import cleansing
 from app.services.extractors import musicbrainz
 
 LASTFM_DIR = DATA_DIR / "raw" / "lastfm"
@@ -55,10 +56,9 @@ def _cache_put(name: str, genres: list[dict]) -> None:
 
 
 def parse_artist_from_kworb_row(row_label: str) -> str:
-    for sep in (" - ", "-"):
-        if sep in row_label:
-            return row_label.split(sep, 1)[0].strip()
-    return row_label.strip()
+    """Thin wrapper kept for call-site readability - the actual parsing is
+    shared with run_cleanse.py so both agree on what a chart row means."""
+    return cleansing.parse_artist_from_chart_row(row_label) or ""
 
 
 def collect_candidates() -> dict[str, str | None]:

@@ -21,6 +21,7 @@ Genre matching is two-tiered:
      tier is silently skipped and normalize_genre() behaves as it did
      before (alias dict + lowercase only).
 """
+import math
 import re
 from collections import Counter
 
@@ -116,6 +117,30 @@ def normalize_genre(raw: str | None) -> str | None:
     return _fuzzy_match_canonical(candidate) or candidate
 
 
+def parse_artist_from_chart_row(row_label: str | None) -> str | None:
+    """Pulls the artist out of a kworb chart-row label.
+
+    kworb writes rows as "Artist - Song", but inconsistently: plenty use no
+    spaces around the dash ("BTS-NORMAL", "ATEEZ-BAD"). Splitting only on
+    " - " leaves those as one string, which then matches nothing in Deezer
+    or MusicBrainz - that's where mangled entries like
+    "Fuerza Regida-COQUETA(w/Grupo Frontera)" came from.
+
+    Known limitation: with no spaces there's no way to tell "BTS-NORMAL"
+    (artist-song) from a hyphenated artist name, so "Jay-Z-Song" yields
+    "Jay". This path is only a fallback for countries Last.fm has no data
+    for, and a truncated artist beats an unmatched one, but the real fix for
+    an affected country is getting its Last.fm name right (see
+    scripts/generate_countries_seed.py).
+    """
+    if not row_label:
+        return None
+    for separator in (" - ", "-"):
+        if separator in row_label:
+            return row_label.split(separator, 1)[0].strip() or None
+    return row_label.strip() or None
+
+
 def normalize_artist_name(raw: str | None) -> str | None:
     """Strip whitespace and drop trailing collaborators from a raw chart-row
     label. Keeps the pipeline's one-artist-per-entry assumption honest
@@ -132,7 +157,7 @@ def normalize_artist_name(raw: str | None) -> str | None:
 def merge_genre_signals(
     lastfm_tags_by_artist: dict[str, list[dict]],
     musicbrainz_genres_by_artist: dict[str, list[str]],
-    top_n: int = 5,
+    top_n: int | None = None,
     stats: dict | None = None,
 ) -> list[dict]:
     """Reconciles two independent genre signals into one ranked list -
@@ -148,8 +173,16 @@ def merge_genre_signals(
     Every genre also gets collapsed onto the <200-entry bucket taxonomy
     (app/services/genre_buckets.py) before scoring - so "chicago drill" and
     "trap" both count toward buckets meaningful enough to compare across
-    20 countries, instead of staying 2,000+ fine-grained MusicBrainz labels
+    countries, instead of staying 2,000+ fine-grained MusicBrainz labels
     that would never overlap between two countries at all.
+
+    `top_n=None` (the default) returns the FULL ranked distribution. That
+    matters: the genres that distinguish one country from another sit in
+    the long tail, not the head - India's "bollywood" ranked 7th and
+    Mexico's "reggaeton" 12th behind the same pop/rock/hip-hop every other
+    country has. Truncating here would throw those away before
+    scripts/run_cleanse.py can compute how *distinctive* each genre is,
+    so callers that want a short list should rank first and truncate last.
 
     If `stats` is passed, it's mutated in place with
     {"total_tags", "unclassified_tags", "unclassified_rate"} - how many raw
@@ -212,5 +245,99 @@ def merge_genre_signals(
 
     return [
         {"genre": genre, "score": score, "sources": sorted(sources[genre])}
-        for genre, score in scores.most_common(top_n)
+        for genre, score in scores.most_common(top_n)  # None => all, ranked
     ]
+
+
+# Minimum share of a country's total genre weight (0-1) for a genre to count
+# as genuinely present there.
+#
+# Both thresholds below are shares rather than raw scores, and that matters.
+# An absolute floor silently changes meaning when the sample depth changes:
+# at 20 artists per country a country's weights totalled ~250, at 100 they
+# total ~1400, so a fixed floor of 3 went from roughly 1.2 percent of the
+# total to 0.2 percent - it stopped filtering anything. Shares are stable
+# across sample depth.
+MIN_SHARE_PRESENT = 0.01  # 1 percent - below this, a genre is a rounding error
+MIN_SHARE_FOR_DISTINCTIVENESS = 0.01
+
+
+def _shares(rows: list[dict]) -> dict[str, float]:
+    """Each genre's fraction (0-1) of one country's total genre weight."""
+    total = sum(row["score"] for row in rows)
+    if total <= 0:
+        return {}
+    return {row["genre"]: row["score"] / total for row in rows}
+
+
+def genre_document_frequency(
+    genres_by_country: dict[str, list[dict]],
+    min_share: float = MIN_SHARE_PRESENT,
+) -> Counter[str]:
+    """How many countries each genre is *meaningfully* present in.
+
+    The "document frequency" half of TF-IDF, where each country is a
+    document. Counting bare presence does not survive a deep sample: with
+    100 artists per country, one stray tag puts a genre in a country's
+    distribution, so nearly every genre appears nearly everywhere and every
+    IDF weight collapses toward zero. Observed directly - j-pop reached
+    document frequency 20/20 and scored 0 distinctiveness for Japan while
+    being 11 percent of what Japan actually plays.
+
+    Requiring a genre to be at least `min_share` of a country's weight before
+    that country counts restores the signal: one tagged artist no longer
+    makes a genre "present" in a country nobody there listens to it in.
+    """
+    df: Counter[str] = Counter()
+    for rows in genres_by_country.values():
+        for genre, share in _shares(rows).items():
+            if share >= min_share:
+                df[genre] += 1
+    return df
+
+
+def score_distinctiveness(
+    rows: list[dict],
+    document_frequency: Counter[str],
+    total_countries: int,
+    min_share: float = MIN_SHARE_FOR_DISTINCTIVENESS,
+) -> list[dict]:
+    """Re-ranks one country's genres by how much they set it apart, rather
+    than by raw popularity.
+
+    Chart data measures commercial reach, so raw popularity says almost the
+    same thing everywhere - across 20 countries, `pop` and `rock` appeared
+    in all 20 and `pop` led 16 of them. Weighting each genre by inverse
+    document frequency cancels exactly that shared baseline:
+
+        distinctiveness = score * log(total_countries / countries_with_genre)
+
+    A genre in every country scores log(1) = 0 and drops out; one in a
+    single country gets the largest multiplier. So "avoid generic pop"
+    needs no hardcoded artist or genre blocklist - the comparison across
+    countries decides what counts as generic, and that stays true as the
+    country list grows.
+
+    `min_share` is a floor on how much of the country's own listening a
+    genre has to account for before rarity can promote it. Rarity alone is
+    not evidence: Japan had bossa nova at 0.4 percent of its weight ranked
+    as its single most distinctive genre purely because few other countries
+    registered it at all.
+
+    Returns rows with a `distinctiveness` key added, highest first. Genres
+    below the floor keep a distinctiveness of 0.0 rather than being dropped,
+    so the caller still sees them in the full distribution.
+    """
+    shares = _shares(rows)
+    scored = []
+    for row in rows:
+        df = document_frequency.get(row["genre"], 0)
+        share = shares.get(row["genre"], 0.0)
+        if df <= 0 or total_countries <= 0 or share < min_share:
+            weight = 0.0
+        else:
+            weight = row["score"] * math.log(total_countries / df)
+        scored.append({**row, "distinctiveness": round(weight, 3)})
+
+    scored.sort(key=lambda r: r["distinctiveness"], reverse=True)
+    return scored

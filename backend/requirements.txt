@@ -1,3 +1,12 @@
-# Local development: everything. Airflow installs requirements-pipeline.txt only.
+# Local development: everything the pipeline needs, plus the API's own deps.
+# This is the file to install into your venv:
+#     pip install -r backend/requirements.txt
+#
+# The API deps live here rather than in requirements-pipeline.txt on purpose -
+# see the note at the top of that file for why they must stay out of the
+# Airflow image.
 -r requirements-pipeline.txt
--r requirements-api.txt
+
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+pydantic>=2.9.0

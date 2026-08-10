@@ -95,11 +95,22 @@ def main() -> None:
         for i, future in enumerate(as_completed(futures), 1):
             name, artist = future.result()
             if artist:
+                # Store None rather than Deezer's empty-hash placeholder URL,
+                # so "has an image" is a real check downstream instead of a
+                # truthiness test that always passes. See deezer.pick_picture.
                 result[name] = {
                     "id": artist["id"],
                     "name": artist["name"],
-                    "picture_medium": artist.get("picture_medium"),
-                    "picture_big": artist.get("picture_big"),
+                    "picture_medium": (
+                        artist.get("picture_medium")
+                        if deezer.has_real_picture(artist.get("picture_medium"))
+                        else None
+                    ),
+                    "picture_big": (
+                        artist.get("picture_big")
+                        if deezer.has_real_picture(artist.get("picture_big"))
+                        else None
+                    ),
                 }
             if i % 100 == 0:
                 print(f"  {i}/{len(artists)} done")

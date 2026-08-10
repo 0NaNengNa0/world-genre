@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 
 import { fetchCountries, type CountrySummary } from './api/countries'
 import { CountryCard } from './components/CountryCard'
+import { CountryDetailModal } from './components/CountryDetailModal'
 
 type Status = 'loading' | 'ready' | 'error'
 
@@ -9,6 +10,7 @@ function App() {
   const [status, setStatus] = useState<Status>('loading')
   const [countries, setCountries] = useState<CountrySummary[]>([])
   const [error, setError] = useState<string>('')
+  const [selected, setSelected] = useState<CountrySummary | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -44,9 +46,21 @@ function App() {
       {status === 'ready' && (
         <section className="grid">
           {countries.map((country) => (
-            <CountryCard key={country.code} country={country} />
+            <CountryCard
+              key={country.code}
+              country={country}
+              onSelect={setSelected}
+            />
           ))}
         </section>
+      )}
+
+      {selected && (
+        <CountryDetailModal
+          code={selected.code}
+          fallbackName={selected.name}
+          onClose={() => setSelected(null)}
+        />
       )}
     </div>
   )

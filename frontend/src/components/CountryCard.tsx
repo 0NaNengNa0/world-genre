@@ -3,13 +3,21 @@ import { flagEmoji } from '../lib/flag'
 
 type Props = {
   country: CountrySummary
+  onSelect: (country: CountrySummary) => void
 }
 
-export function CountryCard({ country }: Props) {
+export function CountryCard({ country, onSelect }: Props) {
   const hasGenres = country.top_genres.length > 0
 
   return (
-    <article className="card">
+    // A real <button> rather than a click handler on the article, so keyboard
+    // and screen-reader users get the same affordance for free.
+    <button
+      type="button"
+      className="card"
+      onClick={() => onSelect(country)}
+      aria-label={`View details for ${country.name}`}
+    >
       <div className="card__cover">
         {country.cover_image ? (
           <img
@@ -48,6 +56,6 @@ export function CountryCard({ country }: Props) {
           Top: {country.top_artists.slice(0, 3).join(', ')}
         </p>
       )}
-    </article>
+    </button>
   )
 }

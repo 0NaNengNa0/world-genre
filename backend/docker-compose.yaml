@@ -79,6 +79,10 @@ x-airflow-common:
     AIRFLOW_CONFIG: '/opt/airflow/config/airflow.cfg'
     # Lets DAGs do `from app.services.extractors import ...` / `from scripts.run_extract_x import main`
     PYTHONPATH: '/opt/airflow'
+    # Overrides the .env value (which points at localhost:5433, correct for
+    # the API running natively on the host) - inside these containers the
+    # warehouse is reachable by service name on the default internal port.
+    DATABASE_URL: 'postgresql://world_genre:world_genre@app-postgres:5432/world_genre'
   volumes:
     - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
     - ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs
@@ -88,12 +92,18 @@ x-airflow-common:
     - ${AIRFLOW_PROJ_DIR:-.}/scripts:/opt/airflow/scripts
     - ${AIRFLOW_PROJ_DIR:-.}/seeds:/opt/airflow/seeds
     - ${AIRFLOW_PROJ_DIR:-.}/data:/opt/airflow/data
+    # Needed by the ensure_schema task (reads sql/schema.sql) and by the
+    # trending-genres API query - both load .sql files from disk at runtime
+    # rather than embedding them as Python strings.
+    - ${AIRFLOW_PROJ_DIR:-.}/sql:/opt/airflow/sql
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on:
     &airflow-common-depends-on
     redis:
       condition: service_healthy
     postgres:
+      condition: service_healthy
+    app-postgres:
       condition: service_healthy
 
 services:
@@ -107,6 +117,33 @@ services:
       - postgres-db-volume:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: always
+
+  # The app's own warehouse - deliberately a separate instance from the
+  # `postgres` service above, which is Airflow's internal metadata DB only
+  # (task state, DAG runs, etc). Mixing app data into an orchestrator's
+  # metadata database is a common real-world mistake to avoid, not just
+  # portfolio pedantry - Airflow migrations/upgrades touch that DB's schema
+  # and shouldn't ever risk touching yours.
+  #
+  # Exposed on host port 5433 (not 5432) so it doesn't collide with a local
+  # Postgres install, and so uvicorn - which runs natively via `npm run
+  # start`/`dev`, not in a container - can reach it at localhost:5433.
+  app-postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: world_genre
+      POSTGRES_PASSWORD: world_genre
+      POSTGRES_DB: world_genre
+    ports:
+      - "5433:5432"
+    volumes:
+      - app-postgres-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "world_genre"]
       interval: 10s
       retries: 5
       start_period: 5s
@@ -342,3 +379,4 @@ services:
 
 volumes:
   postgres-db-volume:
+  app-postgres-db-volume:

@@ -14,9 +14,16 @@ Dependency order:
                   see app/services/cleansing.py (depends on kworb, lastfm,
                   musicbrainz; independent of deezer, which only feeds
                   images, read directly by app/services/countries.py)
+  ensure_schema-> applies sql/schema.sql (idempotent) so a fresh clone or
+                  wiped volume doesn't fail load with UndefinedTable
+  load         -> upserts data/processed/*.json into Postgres (the
+                  warehouse the API reads from) - see scripts/run_load.py.
+                  Depends on cleanse + ensure_schema; independent of
+                  deezer, same reasoning as cleanse itself.
 
 Requires docker-compose.yaml to mount ./app, ./scripts, ./seeds, ./data
-into the containers and PYTHONPATH=/opt/airflow set - both already added.
+into the containers, PYTHONPATH=/opt/airflow set, and DATABASE_URL pointed
+at app-postgres - all already added.
 """
 from __future__ import annotations
 
@@ -69,15 +76,34 @@ def genre_pipeline():
         from scripts.run_cleanse import main
         main()
 
+    @task
+    def ensure_schema():
+        """Applies sql/schema.sql before loading. Every statement in it is
+        CREATE TABLE/INDEX IF NOT EXISTS, so this is a cheap no-op on all
+        runs after the first - it exists so a fresh clone (or a wiped
+        `docker compose down -v` volume) doesn't fail the load task with
+        UndefinedTable just because nobody remembered to run
+        scripts/run_init_db.py by hand."""
+        from scripts.run_init_db import main
+        main()
+
+    @task
+    def load():
+        from scripts.run_load import main
+        main()
+
     kworb = extract_kworb()
     lastfm = extract_lastfm()
     musicbrainz = extract_musicbrainz()
     deezer = extract_deezer()
     cleansed = cleanse()
+    schema = ensure_schema()
+    loaded = load()
 
     [kworb, lastfm] >> musicbrainz
     [kworb, lastfm] >> deezer
     [kworb, lastfm, musicbrainz] >> cleansed
+    [cleansed, schema] >> loaded
 
 
 genre_pipeline()
