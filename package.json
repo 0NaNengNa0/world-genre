@@ -2,8 +2,10 @@
   "name": "world-genre",
   "private": true,
   "scripts": {
-    "dev": "concurrently -n frontend,backend -c cyan,green \"npm --prefix frontend run dev\" \".venv\\Scripts\\python.exe -m uvicorn app.main:app --reload --port 8000 --app-dir backend\"",
-    "start": "concurrently -n airflow,trigger,backend,frontend -c magenta,yellow,green,cyan \"cd backend && docker compose up\" \"node scripts/trigger-genre-pipeline.js\" \".venv\\Scripts\\python.exe -m uvicorn app.main:app --reload --port 8000 --app-dir backend\" \"npm --prefix frontend run dev\"",
+    "predev": "npx kill-port 5173 8000 || echo ports were already free",
+    "dev": "concurrently --kill-others-on-fail -n frontend,backend -c cyan,green \"npm --prefix frontend run dev\" \".venv\\Scripts\\python.exe -m uvicorn app.main:app --reload --port 8000 --app-dir backend\"",
+    "prestart": "npx kill-port 5173 8000 || echo ports were already free",
+    "start": "concurrently -n airflow,trigger,backend,frontend -c magenta,yellow,green,cyan \"cd backend && docker compose up\" \"node scripts/trigger-genre-pipeline.js\" \".venv\\Scripts\\python.exe -m uvicorn app.main:app --port 8000 --app-dir backend\" \"npm --prefix frontend run dev\"",
     "stop": "npm run airflow:down && npx kill-port 5173 8000",
     "airflow:up": "cd backend && docker compose up -d --wait",
     "airflow:down": "cd backend && docker compose down"

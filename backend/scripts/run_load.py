@@ -19,8 +19,10 @@ from datetime import date, datetime, timezone
 
 from app.core.config import COUNTRIES, DATA_DIR
 from app.core.db import get_connection
+from app.services.extractors.kworb import parse_chart_rows
 
 PROCESSED_DIR = DATA_DIR / "processed"
+KWORB_DIR = DATA_DIR / "raw" / "kworb"
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger("run_load")
@@ -95,9 +97,70 @@ def load_country(cur, code: str, name: str, record: dict, snapshot_date: date) -
         )
 
 
+def load_chart_entries(cur, code: str, snapshot_date: date) -> int:
+    """Loads one country's raw chart into the chart_entries fact table.
+
+    Reads data/raw/kworb rather than data/processed: these are measured
+    facts straight from the source, and cleansing has nothing to add to a
+    stream count. It also means the fact table can be populated from raw
+    files already on disk, with no re-scrape.
+
+    Returns the number of rows written.
+    """
+    path = KWORB_DIR / f"{code}.json"
+    if not path.exists():
+        return 0
+
+    entries = parse_chart_rows(json.loads(path.read_text()).get("rows", []))
+    for entry in entries:
+        cur.execute(
+            """
+            INSERT INTO chart_entries (
+                country_code, snapshot_date, position, artist_name, track_name,
+                days_on_chart, peak_position, daily_streams, weekly_streams,
+                total_streams
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (country_code, snapshot_date, position)
+            DO UPDATE SET
+                artist_name = EXCLUDED.artist_name,
+                track_name = EXCLUDED.track_name,
+                days_on_chart = EXCLUDED.days_on_chart,
+                peak_position = EXCLUDED.peak_position,
+                daily_streams = EXCLUDED.daily_streams,
+                weekly_streams = EXCLUDED.weekly_streams,
+                total_streams = EXCLUDED.total_streams
+            """,
+            (
+                code,
+                snapshot_date,
+                entry["position"],
+                entry["artist"],
+                entry["track"],
+                entry["days_on_chart"],
+                entry["peak_position"],
+                entry["daily_streams"],
+                entry["weekly_streams"],
+                entry["total_streams"],
+            ),
+        )
+
+    # Every charting artist becomes a dimension row, even before MusicBrainz
+    # has been asked about them - so run_extract_artist_meta has a worklist,
+    # and a join against `artists` never silently drops chart rows.
+    for artist in {e["artist"] for e in entries}:
+        cur.execute(
+            "INSERT INTO artists (artist_name) VALUES (%s) ON CONFLICT DO NOTHING",
+            (artist,),
+        )
+
+    return len(entries)
+
+
 def main() -> None:
     today = datetime.now(timezone.utc).date()
     loaded, skipped = 0, []
+    chart_rows = 0
 
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -112,14 +175,20 @@ def main() -> None:
                     continue
 
                 load_country(cur, code, name, record, today)
+                # Chart facts are loaded per country too, but from the raw
+                # kworb file - independent of whether cleansing produced
+                # anything for that country.
+                entries = load_chart_entries(cur, code, today)
+                chart_rows += entries
                 loaded += 1
-                logger.info("%s: loaded", code)
+                logger.info("%s: loaded (%d chart entries)", code, entries)
 
     logger.info(
-        "Done. Loaded %d/%d countries into Postgres%s.",
+        "Done. Loaded %d/%d countries into Postgres%s. %d chart entries.",
         loaded,
         len(COUNTRIES),
         f" ({len(skipped)} skipped)" if skipped else "",
+        chart_rows,
     )
 
 

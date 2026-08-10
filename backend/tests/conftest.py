@@ -37,6 +37,14 @@ def pg_database_url(_pg_server, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", db_url)
     yield db_url
 
+    # Return every pooled connection before dropping the database. Postgres
+    # refuses to drop a database that still has clients attached and simply
+    # blocks, which hangs the whole test run rather than failing - so this
+    # isn't tidiness, it's what keeps the suite from deadlocking.
+    from app.core.db import close_pool
+
+    close_pool()
+
     admin_conn = psycopg2.connect(base_uri)
     admin_conn.autocommit = True
     with admin_conn.cursor() as cur:

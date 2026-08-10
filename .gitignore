@@ -1,0 +1,29 @@
+# Root-level ignores. backend/ and frontend/ have their own for their
+# specifics; this covers the repo root, which previously had none - which is
+# how 2,598 node_modules files ended up tracked.
+
+# Dependencies (reinstall with `npm install`, never committed)
+node_modules/
+
+# Python virtualenv - not relocatable, so it must be recreated per machine
+# rather than shared
+.venv/
+__pycache__/
+*.py[cod]
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Editor + OS noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

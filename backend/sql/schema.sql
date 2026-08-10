@@ -71,3 +71,52 @@ CREATE TABLE IF NOT EXISTS country_top_artists (
     snapshot_date DATE NOT NULL,
     PRIMARY KEY (country_code, snapshot_date, rank)
 );
+
+-- Artist dimension. Origin and formation year come from MusicBrainz; both
+-- are nullable because coverage is genuinely partial - MusicBrainz doesn't
+-- know every charting artist, and resolving all of them is rate-limited to
+-- ~1 request/second (see scripts/run_extract_artist_meta.py, which fills
+-- this in incrementally across runs rather than blocking one run for hours).
+--
+-- `resolved_at` distinguishes "not looked up yet" from "looked up, and
+-- MusicBrainz genuinely has no country for them". Without it every rerun
+-- would retry the same permanent misses forever.
+CREATE TABLE IF NOT EXISTS artists (
+    artist_name TEXT PRIMARY KEY,
+    mbid TEXT,
+    origin_country TEXT,   -- ISO 3166-1 alpha-2, matching countries.code
+    formed_year INTEGER,
+    resolved_at TIMESTAMPTZ
+);
+
+-- THE fact table: one row per track per country per day, carrying additive
+-- measures (streams) rather than a score this project invented.
+--
+-- Everything else here is derived or dimensional - country_genre_scores
+-- holds computed weights, country_top_artists holds a ranking. This holds
+-- measured quantities from the source, at the finest grain available, which
+-- is what makes "streams by genre", "domestic share" and "chart churn" all
+-- answerable from one table instead of needing a new pipeline each.
+CREATE TABLE IF NOT EXISTS chart_entries (
+    country_code TEXT NOT NULL REFERENCES countries (code),
+    snapshot_date DATE NOT NULL,
+    position INTEGER NOT NULL,
+    artist_name TEXT NOT NULL,
+    track_name TEXT,
+    days_on_chart INTEGER,
+    peak_position INTEGER,
+    -- Nullable on purpose: kworb leaves these blank for some entries, and a
+    -- missing measure is not the same fact as zero streams.
+    daily_streams BIGINT,
+    weekly_streams BIGINT,
+    total_streams BIGINT,
+    -- Position is the natural key within a country-day: a track can't hold
+    -- two chart positions, but the same artist legitimately holds several.
+    PRIMARY KEY (country_code, snapshot_date, position)
+);
+
+CREATE INDEX IF NOT EXISTS idx_chart_entries_artist
+    ON chart_entries (artist_name);
+
+CREATE INDEX IF NOT EXISTS idx_chart_entries_latest
+    ON chart_entries (country_code, snapshot_date DESC);

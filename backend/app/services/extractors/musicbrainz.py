@@ -66,6 +66,48 @@ def search_artist(name: str, timeout: int = 20) -> str | None:
     return artists[0]["id"] if artists else None
 
 
+def get_artist_meta(mbid: str, timeout: int = 20) -> dict:
+    """Origin country and formation year for an artist.
+
+    Both come off the same artist lookup that get_genres already calls, so
+    fetching them is one request rather than a new integration.
+
+    `country` is preferred over `area` because MusicBrainz's area can be a
+    city or region ("London") while country is the ISO 3166-1 code the rest
+    of this project keys on. Falls back to the area's own country code when
+    the top-level field is absent, which happens for a fair number of
+    artists.
+
+    Returns {"country": str|None, "formed_year": int|None} - both routinely
+    None, since MusicBrainz's coverage of smaller artists is patchy. That's
+    reported as coverage rather than hidden; see the domestic-share query.
+    """
+    resp = _get_with_retry(
+        f"{API_BASE}/artist/{mbid}",
+        params={"fmt": "json"},
+        timeout=timeout,
+    )
+    resp.raise_for_status()
+    payload = resp.json()
+
+    country = payload.get("country")
+    if not country:
+        area = payload.get("area") or {}
+        for code in area.get("iso-3166-1-codes") or []:
+            country = code
+            break
+
+    begin = ((payload.get("life-span") or {}).get("begin")) or ""
+    # Dates arrive as "1985", "1985-06" or "1985-06-21"; only the year is
+    # meaningful for "how old is the music this country listens to".
+    formed_year = int(begin[:4]) if begin[:4].isdigit() else None
+
+    return {
+        "country": country.lower() if country else None,
+        "formed_year": formed_year,
+    }
+
+
 def get_genres(mbid: str, timeout: int = 20) -> list[dict]:
     """Returns a lean genre list: name, count (community vote count).
 

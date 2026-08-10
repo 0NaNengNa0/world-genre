@@ -1,3 +1,21 @@
+export type DomesticShare = {
+  /** Share of attributable streams going to artists from this country. */
+  domestic_percentage: number
+  /** How much of the country's streaming could be attributed at all. The
+   *  figure above is uninterpretable without it. */
+  coverage_percentage: number
+  classified_entries: number
+  total_entries: number
+}
+
+export type ChartTrack = {
+  position: number
+  track: string | null
+  artist: string
+  daily_streams: number | null
+  days_on_chart: number | null
+}
+
 export type CountrySummary = {
   code: string
   name: string
@@ -5,6 +23,8 @@ export type CountrySummary = {
   top_genres: string[]
   distinctive_genres: string[]
   top_artists: string[]
+  /** Null until artist origins have been resolved by the pipeline. */
+  domestic_share: DomesticShare | null
   cover_image: string | null
 }
 
@@ -37,7 +57,57 @@ export type CountryDetail = {
   popularity: GenreBreakdown
   /** Share of what sets it apart from other countries (TF-IDF weighted). */
   distinctiveness: GenreBreakdown
+  domestic_share: DomesticShare | null
+  /** Actual charting songs with measured streams, from the fact table. */
+  top_tracks: ChartTrack[]
+  hidden_gems: HiddenGem[]
   cover_image: string | null
+}
+
+export type HiddenGem = {
+  artist: string
+  streams: number
+  best_position: number | null
+  /** Out of total_countries — what makes the "hidden" claim checkable. */
+  country_count: number
+  total_countries: number
+  gem_score: number
+}
+
+export type GlobalArtist = {
+  artist: string
+  streams: number
+  previous_streams: number | null
+  /** Null until a second snapshot exists — not the same as unchanged. */
+  delta: number | null
+  country_count: number
+  origin_country: string | null
+}
+
+export async function fetchGlobalArtists(): Promise<GlobalArtist[]> {
+  const response = await fetch('/api/artists/global')
+  if (!response.ok) {
+    throw new Error(`Failed to fetch global artists (${response.status})`)
+  }
+  const data = (await response.json()) as { artists: GlobalArtist[] }
+  return data.artists
+}
+
+export type TrendingGenre = {
+  country_code: string
+  genre: string
+  score: number
+  previous_score: number
+  delta: number
+}
+
+export async function fetchTrendingGenres(): Promise<TrendingGenre[]> {
+  const response = await fetch('/api/genres/trending')
+  if (!response.ok) {
+    throw new Error(`Failed to fetch trending genres (${response.status})`)
+  }
+  const data = (await response.json()) as { genres: TrendingGenre[] }
+  return data.genres
 }
 
 type CountriesResponse = {

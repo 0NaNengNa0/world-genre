@@ -143,6 +143,78 @@ export function CountryDetailModal({ code, fallbackName, onClose }: Props) {
             </section>
 
             <section className="detail__section">
+              {detail.domestic_share && (
+                <>
+                  <h3 className="detail__subtitle">Domestic vs imported</h3>
+                  <div className="stat">
+                    <span className="stat__value">
+                      {detail.domestic_share.domestic_percentage.toFixed(0)}%
+                    </span>
+                    <span className="stat__label">
+                      of streaming goes to {detail.name}'s own artists
+                    </span>
+                  </div>
+                  <p className="detail__caption">
+                    Based on {detail.domestic_share.coverage_percentage.toFixed(0)}% of the
+                    country's streams ({detail.domestic_share.classified_entries} of{' '}
+                    {detail.domestic_share.total_entries} charting tracks have a known
+                    artist origin). Origins fill in gradually — MusicBrainz is rate-limited
+                    — so coverage rises with each pipeline run.
+                  </p>
+                </>
+              )}
+
+              {detail.hidden_gems.length > 0 && (
+                <>
+                  <h3 className="detail__subtitle">
+                    Hidden gems{' '}
+                    <span className="detail__count">big here, nowhere else</span>
+                  </h3>
+                  <ul className="gems">
+                    {detail.hidden_gems.slice(0, 6).map((g) => (
+                      <li key={g.artist} className="gems__item">
+                        <span className="gems__name">{g.artist}</span>
+                        <span className="gems__reach">
+                          charts in {g.country_count}/{g.total_countries}
+                        </span>
+                        <span className="tracks__streams">
+                          {g.streams.toLocaleString()}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                  <p className="detail__caption">
+                    Streams here weighted by how few other countries chart the artist at
+                    all — so acts charting everywhere score zero and can't appear.
+                  </p>
+                </>
+              )}
+
+              {detail.top_tracks.length > 0 && (
+                <>
+                  <h3 className="detail__subtitle">
+                    Charting now{' '}
+                    <span className="detail__count">by daily streams</span>
+                  </h3>
+                  <ol className="tracks">
+                    {detail.top_tracks.map((t) => (
+                      <li key={t.position} className="tracks__item">
+                        <span className="artists__rank">{t.position}</span>
+                        <span className="tracks__name">
+                          {t.track ?? 'Unknown track'}
+                          <span className="tracks__artist">{t.artist}</span>
+                        </span>
+                        <span className="tracks__streams">
+                          {t.daily_streams === null
+                            ? '—'
+                            : t.daily_streams.toLocaleString()}
+                        </span>
+                      </li>
+                    ))}
+                  </ol>
+                </>
+              )}
+
               <h3 className="detail__subtitle">
                 Top artists{' '}
                 <span className="detail__count">({detail.artists.length})</span>

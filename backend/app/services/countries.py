@@ -6,9 +6,9 @@ directly. The API's read path shouldn't need to know those files exist at
 all; that split is also why this module has no genre-normalization or
 reconciliation logic in it (see app/services/cleansing.py for that).
 
-Deezer cover images are the one thing still read from a flat file - they're
-a simple name->URL lookup with no history/versioning need, so warehousing
-them would be overhead with no payoff.
+Cover images are the one thing still read from flat files - they're a simple
+name->URL lookup with no history/versioning need, so warehousing them would
+be overhead with no payoff.
 """
 import json
 
@@ -17,6 +17,7 @@ from app.core.db import get_connection
 from app.services.extractors import deezer
 
 DEEZER_ARTISTS_PATH = DATA_DIR / "raw" / "deezer" / "artists.json"
+WIKIDATA_ARTISTS_PATH = DATA_DIR / "raw" / "wikidata" / "artists.json"
 
 # country_genre_scores holds the union of both rankings (a genre can be in the
 # popularity list, the distinctiveness list, or both), so each list is longer
@@ -43,26 +44,53 @@ def _load_deezer_images() -> dict[str, str]:
     return images
 
 
-_deezer_cache: tuple[float, dict[str, str]] | None = None
+def _load_wikidata_images() -> dict[str, str]:
+    """Artist name -> Wikimedia Commons thumbnail, for artists Deezer lacks.
 
-
-def _deezer_images() -> dict[str, str]:
-    """Cached artist-image lookup, invalidated when the file changes.
-
-    Loading this once at import was wrong in a way that only shows up in a
-    long-running process: the pipeline rewrites artists.json on every run, so
-    the API kept serving the image mapping from whenever it happened to start
-    - indefinitely in production, since nothing reloads it. Keying the cache
-    on mtime costs one stat() per request and keeps the file read rare.
+    See app/services/extractors/wikidata.py for why this exists and why it's
+    a fallback rather than the primary source.
     """
-    global _deezer_cache
-    try:
-        mtime = DEEZER_ARTISTS_PATH.stat().st_mtime
-    except OSError:
+    if not WIKIDATA_ARTISTS_PATH.exists():
         return {}
-    if _deezer_cache is None or _deezer_cache[0] != mtime:
-        _deezer_cache = (mtime, _load_deezer_images())
-    return _deezer_cache[1]
+    payload = json.loads(WIKIDATA_ARTISTS_PATH.read_text())
+    return {
+        name: data["image"]
+        for name, data in payload.items()
+        if isinstance(data, dict) and data.get("image")
+    }
+
+
+_image_cache: tuple[tuple[float, float], dict[str, str]] | None = None
+
+
+def _mtime(path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _artist_images() -> dict[str, str]:
+    """Merged artist->image lookup, Deezer first then Wikidata.
+
+    Deezer wins where it has a real photo: it covers current chart artists far
+    better, whereas Commons requires a free licence and skews toward older and
+    more Western acts. Wikidata only fills gaps.
+
+    Cached against both files' mtimes. Loading once at import was wrong in a
+    way that only shows up in a long-running process: the pipeline rewrites
+    these files on every run, so the API kept serving whatever mapping existed
+    when it started - indefinitely in production, since nothing reloads it.
+    Two stat() calls per request keeps the file reads rare without going
+    stale.
+    """
+    global _image_cache
+    stamps = (_mtime(DEEZER_ARTISTS_PATH), _mtime(WIKIDATA_ARTISTS_PATH))
+    if _image_cache is None or _image_cache[0] != stamps:
+        merged = _load_wikidata_images()
+        merged.update(_load_deezer_images())  # Deezer takes precedence
+        _image_cache = (stamps, merged)
+    return _image_cache[1]
 
 
 def _fetch_latest_artist_count(cur, code: str) -> int:
@@ -82,6 +110,79 @@ def _fetch_latest_artist_count(cur, code: str) -> int:
 _GENRE_SHARES_SQL = (
     DATA_DIR.parent / "sql" / "queries" / "country_genre_shares.sql"
 ).read_text()
+
+_DOMESTIC_SHARE_SQL = (
+    DATA_DIR.parent / "sql" / "queries" / "domestic_share.sql"
+).read_text()
+
+_DOMESTIC_SHARE_ALL_SQL = (
+    DATA_DIR.parent / "sql" / "queries" / "domestic_share_all.sql"
+).read_text()
+
+_HIDDEN_GEMS_SQL = (DATA_DIR.parent / "sql" / "queries" / "hidden_gems.sql").read_text()
+
+_GLOBAL_ARTISTS_SQL = (
+    DATA_DIR.parent / "sql" / "queries" / "global_artists.sql"
+).read_text()
+
+DETAIL_GEM_LIMIT = 10
+GLOBAL_ARTIST_LIMIT = 40
+
+
+def get_global_artists(limit: int = GLOBAL_ARTIST_LIMIT) -> list[dict]:
+    """Biggest artists worldwide by charted streams.
+
+    Summed across every country's chart, so an artist charting modestly in
+    forty countries can outrank one dominating a single large market.
+    `delta` is None until a second snapshot exists - see the query.
+    """
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(_GLOBAL_ARTISTS_SQL, {"limit": limit})
+            rows = cur.fetchall()
+
+    return [
+        {
+            "artist": r[0],
+            "streams": int(r[1]),
+            "previous_streams": int(r[2]) if r[2] is not None else None,
+            "delta": int(r[3]) if r[3] is not None else None,
+            "country_count": r[4],
+            "origin_country": r[5],
+        }
+        for r in rows
+    ]
+
+
+def _summarize_share(total, classified, domestic, entries, classified_entries) -> dict | None:
+    """Shared shaping for the one-country and all-countries share queries, so
+    the two can't drift apart in how they round or when they give up."""
+    if not classified:
+        return None
+    return {
+        "domestic_percentage": round(100.0 * float(domestic) / float(classified), 2),
+        "coverage_percentage": round(100.0 * float(classified) / float(total), 2)
+        if total
+        else 0.0,
+        "classified_entries": classified_entries,
+        "total_entries": entries,
+    }
+
+
+def _fetch_domestic_share(cur, code: str) -> dict | None:
+    """Share of a country's chart streams going to its own artists.
+
+    Returns None when nothing can be said yet - no chart data, or no artist
+    origins resolved. That's a real state early on: the artists dimension
+    fills in over successive pipeline runs (MusicBrainz is rate-limited), so
+    the honest answer at first is "not enough data", not "0 percent
+    domestic".
+    """
+    cur.execute(_DOMESTIC_SHARE_SQL, {"code": code})
+    row = cur.fetchone()
+    if row is None:
+        return None
+    return _summarize_share(*row)
 
 # The only values ever substituted into {weight_column} in that query. A
 # column name can't be a bind parameter, so it goes in by string formatting -
@@ -139,12 +240,15 @@ def _fetch_genre_breakdown(cur, code: str, weight_column: str, limit: int) -> di
 # single "other" slice instead of being silently dropped.
 DETAIL_ARTIST_LIMIT = 100
 DETAIL_GENRE_LIMIT = 10
+DETAIL_TRACK_LIMIT = 20
 
 
 def get_country_detail(
     code: str,
     artist_limit: int = DETAIL_ARTIST_LIMIT,
     genre_limit: int = DETAIL_GENRE_LIMIT,
+    track_limit: int = DETAIL_TRACK_LIMIT,
+    gem_limit: int = DETAIL_GEM_LIMIT,
 ) -> dict | None:
     """Full detail for one country, or None if it isn't in the warehouse.
 
@@ -195,8 +299,54 @@ def get_country_detail(
             artists = [r[0] for r in cur.fetchall()]
 
             artist_count = _fetch_latest_artist_count(cur, country_code)
+            domestic_share = _fetch_domestic_share(cur, country_code)
 
-    images = _deezer_images()
+            # Artists this country streams heavily that barely chart
+            # elsewhere - the artist-level counterpart to genre
+            # distinctiveness, and the answer to "what would I only find
+            # here".
+            cur.execute(_HIDDEN_GEMS_SQL, {"code": country_code, "limit": gem_limit})
+            hidden_gems = [
+                {
+                    "artist": r[0],
+                    "streams": int(r[1]),
+                    "best_position": r[2],
+                    "country_count": r[3],
+                    "total_countries": r[4],
+                    "gem_score": float(r[5]),
+                }
+                for r in cur.fetchall()
+            ]
+
+            # Straight from the fact table - actual charting tracks with
+            # measured streams, as opposed to the artist rankings elsewhere
+            # which are derived from Last.fm listener counts.
+            cur.execute(
+                """
+                SELECT position, track_name, artist_name, daily_streams, days_on_chart
+                FROM chart_entries
+                WHERE country_code = %s
+                  AND snapshot_date = (
+                      SELECT MAX(snapshot_date) FROM chart_entries
+                      WHERE country_code = %s
+                  )
+                ORDER BY position
+                LIMIT %s
+                """,
+                (country_code, country_code, track_limit),
+            )
+            top_tracks = [
+                {
+                    "position": r[0],
+                    "track": r[1],
+                    "artist": r[2],
+                    "daily_streams": r[3],
+                    "days_on_chart": r[4],
+                }
+                for r in cur.fetchall()
+            ]
+
+    images = _artist_images()
     cover_image = next((images[a] for a in artists if a in images), None)
 
     return {
@@ -206,6 +356,9 @@ def get_country_detail(
         "artists": artists,
         "popularity": popularity,
         "distinctiveness": distinctiveness,
+        "domestic_share": domestic_share,
+        "top_tracks": top_tracks,
+        "hidden_gems": hidden_gems,
         "cover_image": cover_image,
     }
 
@@ -308,6 +461,12 @@ def get_country_summaries() -> list[dict]:
             )
             artist_rows = cur.fetchall()
 
+            # One grouped query for all countries, not one per country - the
+            # map colours 76 shapes by this, and per-country would rebuild
+            # the N+1 pattern this endpoint was rewritten to remove.
+            cur.execute(_DOMESTIC_SHARE_ALL_SQL)
+            share_rows = cur.fetchall()
+
     top_genres: dict[str, list[tuple[int, str]]] = {}
     distinctive: dict[str, list[tuple[int, str]]] = {}
     for code, genre, pop_rank, dist_rank, distinctiveness in genre_rows:
@@ -324,7 +483,13 @@ def get_country_summaries() -> list[dict]:
     for code, artist_name in artist_rows:
         artists.setdefault(code, []).append(artist_name)
 
-    images = _deezer_images()
+    shares: dict[str, dict] = {}
+    for code, total, classified, domestic, entries, classified_entries in share_rows:
+        share = _summarize_share(total, classified, domestic, entries, classified_entries)
+        if share:
+            shares[code] = share
+
+    images = _artist_images()
     summaries = []
     for code, name, artist_count in countries:
         scanned = artists.get(code, [])
@@ -338,6 +503,9 @@ def get_country_summaries() -> list[dict]:
                 "artist_count": artist_count,
                 "top_genres": [g for _, g in sorted(top_genres.get(code, []))],
                 "distinctive_genres": [g for _, g in sorted(distinctive.get(code, []))],
+                # Present so the map can colour by it; None until enough
+                # artist origins are resolved to say anything.
+                "domestic_share": shares.get(code),
                 # Only what the card renders. Returning all 100 meant ~7,600
                 # artist strings in a payload that displays three per country.
                 "top_artists": scanned[:SUMMARY_ARTISTS_RETURNED],

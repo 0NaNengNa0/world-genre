@@ -14,6 +14,9 @@ Dependency order:
                   see app/services/cleansing.py (depends on kworb, lastfm,
                   musicbrainz; independent of deezer, which only feeds
                   images, read directly by app/services/countries.py)
+  wikidata     -> fills in artist photos deezer had none for, looked up by
+                  MusicBrainz id on Wikidata/Commons (depends on deezer,
+                  since it only asks about deezer's misses)
   ensure_schema-> applies sql/schema.sql (idempotent) so a fresh clone or
                   wiped volume doesn't fail load with UndefinedTable
   load         -> upserts data/processed/*.json into Postgres (the
@@ -77,6 +80,11 @@ def genre_pipeline():
         main()
 
     @task
+    def extract_wikidata():
+        from scripts.run_extract_wikidata import main
+        main()
+
+    @task
     def ensure_schema():
         """Applies sql/schema.sql before loading. Every statement in it is
         CREATE TABLE/INDEX IF NOT EXISTS, so this is a cheap no-op on all
@@ -92,18 +100,36 @@ def genre_pipeline():
         from scripts.run_load import main
         main()
 
+    @task
+    def enrich_artists():
+        """Fills the artists dimension (origin country, formation year).
+
+        Runs AFTER load because its worklist is the artists load just wrote,
+        and it's bounded to a fixed number of lookups per run - MusicBrainz's
+        ~1 req/sec limit makes resolving every charting artist a multi-hour
+        job, so the dimension fills in across successive weekly runs instead.
+        """
+        from scripts.run_extract_artist_meta import main
+        main()
+
     kworb = extract_kworb()
     lastfm = extract_lastfm()
     musicbrainz = extract_musicbrainz()
     deezer = extract_deezer()
+    wikidata = extract_wikidata()
     cleansed = cleanse()
     schema = ensure_schema()
     loaded = load()
+    enriched = enrich_artists()
 
     [kworb, lastfm] >> musicbrainz
     [kworb, lastfm] >> deezer
+    # Strictly after deezer, not in parallel: it only queries Wikidata about
+    # the artists deezer failed to find a photo for, so it needs deezer's
+    # output to know what's missing.
+    deezer >> wikidata
     [kworb, lastfm, musicbrainz] >> cleansed
-    [cleansed, schema] >> loaded
+    [cleansed, schema] >> loaded >> enriched
 
 
 genre_pipeline()

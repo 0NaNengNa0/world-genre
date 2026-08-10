@@ -439,3 +439,527 @@ ul {
   line-height: 1.45;
   color: var(--text-muted);
 }
+
+/* ---------------------------------------------------------------------------
+   World map
+   --------------------------------------------------------------------------- */
+
+.page__headline {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--gap);
+  flex-wrap: wrap;
+}
+
+.map-layout {
+  display: grid;
+  grid-template-columns: 1fr minmax(260px, 320px);
+  gap: var(--gap-lg);
+  align-items: start;
+}
+
+/* Below this the popup can't sit beside the map without squeezing it, so it
+   stacks underneath instead. */
+@media (max-width: 900px) {
+  .map-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+.map {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--gap);
+  position: relative;
+}
+
+.map__svg {
+  width: 100%;
+  height: auto;
+  display: block;
+  cursor: grab;
+  /* Stops the browser hijacking wheel/drag for page scroll and text
+     selection while panning the map. */
+  touch-action: none;
+  user-select: none;
+}
+
+.map__svg:active {
+  cursor: grabbing;
+}
+
+/* Only button- and selection-driven moves animate. Wheel and drag set this
+   off, because easing them leaves the map trailing a frame behind the
+   cursor. */
+.map__layer--animated {
+  transition: transform 420ms cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+
+/* Zoom controls, floated over the map's top-right corner. */
+.map__controls {
+  position: absolute;
+  top: calc(var(--gap) + 0.5rem);
+  right: calc(var(--gap) + 0.5rem);
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  z-index: 1;
+}
+
+.map__btn {
+  width: 2rem;
+  height: 2rem;
+  display: grid;
+  place-items: center;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font: inherit;
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+  transition: border-color 150ms ease, color 150ms ease;
+}
+
+.map__btn--wide {
+  width: auto;
+  padding: 0 0.5rem;
+  font-size: 0.72rem;
+}
+
+.map__btn:hover,
+.map__btn:focus-visible {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.map__country {
+  stroke: var(--bg);
+  stroke-width: 0.5;
+  transition: fill 120ms ease;
+}
+
+/* Countries with no data are context only - not clickable, and visibly
+   inert so the map doesn't invite clicks that do nothing. */
+.map__country--no-data {
+  fill: var(--surface-2);
+  pointer-events: none;
+}
+
+.map__country--has-data {
+  fill: #3b3b52;
+  cursor: pointer;
+}
+
+.map__country--hovered {
+  fill: var(--accent);
+}
+
+.map__country--selected {
+  fill: var(--accent);
+  stroke: var(--text);
+  stroke-width: 1;
+}
+
+/* A focusable <path> gets a rectangular focus ring drawn around its bounding
+   box, which reads as a white box floating over the map. Suppress it for
+   every focus, then reinstate a visible cue for keyboard users only via
+   focus-visible below - a mouse click fires plain :focus, not :focus-visible,
+   which is why killing only the latter left the box on click. */
+.map__country:focus {
+  outline: none;
+}
+
+.map__country:focus-visible {
+  outline: none;
+  stroke: var(--text);
+  stroke-width: 1.5;
+}
+
+.map__legend {
+  margin-top: var(--gap);
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+/* Quick-look popup beside the map */
+.popup {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--gap);
+  position: sticky;
+  top: var(--gap);
+}
+
+.popup__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.popup__title {
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+
+.popup__meta {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin-bottom: var(--gap);
+}
+
+.popup__subtitle {
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  margin: var(--gap) 0 0.5rem;
+}
+
+.popup__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  padding: 0;
+}
+
+.popup__artists {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.85rem;
+}
+
+.popup__more {
+  margin-top: var(--gap-lg);
+  width: 100%;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 0.55rem 0.75rem;
+  font: inherit;
+  font-size: 0.85rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: filter 150ms ease;
+}
+
+.popup__more:hover {
+  filter: brightness(1.12);
+}
+
+.popup__more:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: 2px;
+}
+
+/* ---------------------------------------------------------------------------
+   Map toolbar, colour key, tracks, trends, compare
+   --------------------------------------------------------------------------- */
+
+.map-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--gap);
+  margin-bottom: var(--gap);
+  flex-wrap: wrap;
+}
+
+.map-toolbar .detail__subtitle {
+  margin: 0;
+}
+
+.map__key {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.9rem;
+  margin-top: var(--gap);
+  padding: 0;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.map__key-item {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+/* A single headline number with its caption, e.g. domestic share. */
+.stat {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin-bottom: 0.35rem;
+}
+
+.stat__value {
+  font-size: 1.9rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--accent);
+}
+
+.stat__label {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+/* Charting tracks */
+.tracks {
+  list-style: none;
+  margin: 0 0 var(--gap-lg);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.tracks__item {
+  display: grid;
+  grid-template-columns: 2rem 1fr auto;
+  align-items: baseline;
+  gap: 0.5rem;
+  padding: 0.35rem 0.4rem;
+  border-radius: var(--radius-sm);
+  font-size: 0.85rem;
+}
+
+.tracks__item:nth-child(odd) {
+  background: var(--surface-2);
+}
+
+.tracks__name {
+  display: flex;
+  flex-direction: column;
+  overflow-wrap: anywhere;
+}
+
+.tracks__artist {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.tracks__streams {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+/* Trends */
+.trend {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: var(--gap-lg);
+}
+
+.trend__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.trend__item {
+  display: grid;
+  grid-template-columns: 1.5rem 1fr auto auto;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0.5rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 0.85rem;
+}
+
+.trend__flag {
+  font-size: 1.1rem;
+  line-height: 1;
+}
+
+.trend__country {
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.trend__up {
+  color: #4ade80;
+  font-variant-numeric: tabular-nums;
+}
+
+.trend__down {
+  color: #f87171;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Compare */
+.compare__pickers {
+  display: flex;
+  gap: var(--gap-lg);
+  flex-wrap: wrap;
+  margin-bottom: var(--gap-lg);
+}
+
+.compare__picker {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.compare__select {
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.4rem 0.6rem;
+  font: inherit;
+  font-size: 0.9rem;
+  min-width: 200px;
+}
+
+.compare__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: var(--gap-lg);
+  margin-bottom: var(--gap);
+}
+
+/* Hidden gems */
+.gems {
+  list-style: none;
+  margin: 0 0 var(--gap);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.gems__item {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: baseline;
+  gap: 0.6rem;
+  padding: 0.35rem 0.4rem;
+  border-radius: var(--radius-sm);
+  font-size: 0.85rem;
+}
+
+.gems__item:nth-child(odd) {
+  background: var(--surface-2);
+}
+
+.gems__name {
+  overflow-wrap: anywhere;
+}
+
+.gems__reach {
+  font-size: 0.7rem;
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+/* Compare difference table */
+.diff {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.diff__head,
+.diff__row {
+  display: grid;
+  grid-template-columns: minmax(90px, 1.6fr) 1fr 1fr 0.8fr;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.35rem 0.5rem;
+  font-size: 0.85rem;
+}
+
+.diff__head {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+
+.diff__row:nth-child(odd) {
+  background: var(--surface-2);
+  border-radius: var(--radius-sm);
+}
+
+.diff__num {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+
+/* Positive gap = higher in country A, negative = higher in B. Two colours
+   rather than one, so the direction is readable without doing the maths. */
+.diff__left {
+  color: #7c5cff;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.diff__right {
+  color: #14b8a6;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+/* Global artists */
+.global {
+  list-style: none;
+  margin: 0 0 var(--gap);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.global__head,
+.global__row {
+  display: grid;
+  grid-template-columns: 2rem 1fr 5rem 8rem auto;
+  align-items: baseline;
+  gap: 0.6rem;
+  padding: 0.4rem 0.5rem;
+  font-size: 0.88rem;
+}
+
+.global__head {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+
+.global__row:nth-child(odd) {
+  background: var(--surface-2);
+  border-radius: var(--radius-sm);
+}
+
+.global__name {
+  overflow-wrap: anywhere;
+}
+
+.global__num {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}

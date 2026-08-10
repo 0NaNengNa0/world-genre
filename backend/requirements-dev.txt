@@ -9,3 +9,7 @@ pgserver>=0.1.4
 # ISO 3166-1 country names for scripts/generate_countries_seed.py. Dev-only
 # because it regenerates a committed seed file - nothing at runtime imports it.
 pycountry>=24.6.1
+# Required by fastapi.testclient (starlette imports it lazily and raises at
+# import time if it's missing), used to exercise the API through the real ASGI
+# stack in tests/test_error_handling.py.
+httpx2>=0.28.0

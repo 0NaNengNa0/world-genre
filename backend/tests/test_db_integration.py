@@ -168,6 +168,314 @@ class TestDistinctiveness:
         assert len(summary["distinctive_genres"]) == 5
 
 
+class TestChartEntriesAndDomesticShare:
+    def _load_chart(self, cur, code, entries, snapshot=date(2026, 1, 1)):
+        """Writes chart_entries + artists rows the way run_load does."""
+        cur.execute(
+            "INSERT INTO countries (code, name) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+            (code, code.upper()),
+        )
+        for i, (artist, streams) in enumerate(entries, start=1):
+            cur.execute(
+                """
+                INSERT INTO chart_entries (country_code, snapshot_date, position,
+                                           artist_name, track_name, daily_streams)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (code, snapshot, i, artist, f"track{i}", streams),
+            )
+            cur.execute(
+                "INSERT INTO artists (artist_name) VALUES (%s) ON CONFLICT DO NOTHING",
+                (artist,),
+            )
+
+    def test_domestic_share_is_weighted_by_streams_not_row_count(self, pg_database_url):
+        init_db()
+        with get_connection() as conn, conn.cursor() as cur:
+            # Three domestic tracks with small numbers, one huge import: by
+            # row count this is 75 percent domestic, by streams it's 10.
+            self._load_chart(
+                cur, "zz",
+                [("Local A", 10), ("Local B", 10), ("Local C", 10), ("Global Star", 270)],
+            )
+            cur.execute(
+                "UPDATE artists SET origin_country='zz', resolved_at=now() "
+                "WHERE artist_name LIKE 'Local%'"
+            )
+            cur.execute(
+                "UPDATE artists SET origin_country='us', resolved_at=now() "
+                "WHERE artist_name = 'Global Star'"
+            )
+
+        from app.services.countries import get_country_detail
+
+        share = get_country_detail("zz")["domestic_share"]
+        assert share["domestic_percentage"] == pytest.approx(10.0)
+        assert share["coverage_percentage"] == pytest.approx(100.0)
+
+    def test_unresolved_artists_reduce_coverage_not_the_domestic_share(
+        self, pg_database_url
+    ):
+        init_db()
+        with get_connection() as conn, conn.cursor() as cur:
+            self._load_chart(cur, "zz", [("Known", 50), ("Unknown", 50)])
+            cur.execute(
+                "UPDATE artists SET origin_country='zz', resolved_at=now() "
+                "WHERE artist_name='Known'"
+            )
+
+        from app.services.countries import get_country_detail
+
+        share = get_country_detail("zz")["domestic_share"]
+        # The one attributable artist is domestic, so 100 percent - but only
+        # half the streams could be attributed. Reporting 50 percent domestic
+        # here would be inventing a fact about the unresolved half.
+        assert share["domestic_percentage"] == pytest.approx(100.0)
+        assert share["coverage_percentage"] == pytest.approx(50.0)
+        assert share["classified_entries"] == 1
+        assert share["total_entries"] == 2
+
+    def test_none_when_no_origins_resolved_yet(self, pg_database_url):
+        init_db()
+        with get_connection() as conn, conn.cursor() as cur:
+            self._load_chart(cur, "zz", [("A", 10), ("B", 20)])
+
+        from app.services.countries import get_country_detail
+
+        # The artists dimension fills in over successive runs, so early on
+        # the honest answer is "can't say", not "0 percent domestic".
+        assert get_country_detail("zz")["domestic_share"] is None
+
+    def test_falls_back_to_weekly_streams_when_daily_is_missing(self, pg_database_url):
+        init_db()
+        with get_connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO countries (code, name) VALUES ('zz','Z') ON CONFLICT DO NOTHING"
+            )
+            # kworb leaves daily blank on some entries while still reporting
+            # weekly; dropping those would bias the result.
+            cur.execute(
+                "INSERT INTO chart_entries (country_code, snapshot_date, position,"
+                " artist_name, daily_streams, weekly_streams)"
+                " VALUES ('zz', %s, 1, 'A', NULL, 700)",
+                (date(2026, 1, 1),),
+            )
+            cur.execute(
+                "INSERT INTO artists (artist_name, origin_country, resolved_at)"
+                " VALUES ('A','zz',now())"
+            )
+
+        from app.services.countries import get_country_detail
+
+        share = get_country_detail("zz")["domestic_share"]
+        assert share["domestic_percentage"] == pytest.approx(100.0)
+        assert share["coverage_percentage"] == pytest.approx(100.0)
+
+    def test_reloading_the_same_day_upserts_chart_entries(self, pg_database_url):
+        init_db()
+        snapshot = date(2026, 1, 1)
+        with get_connection() as conn, conn.cursor() as cur:
+            self._load_chart(cur, "zz", [("A", 10)], snapshot)
+        with get_connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO chart_entries (country_code, snapshot_date, position,
+                                           artist_name, daily_streams)
+                VALUES ('zz', %s, 1, 'A', 999)
+                ON CONFLICT (country_code, snapshot_date, position)
+                DO UPDATE SET daily_streams = EXCLUDED.daily_streams
+                """,
+                (snapshot,),
+            )
+        with get_connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT daily_streams FROM chart_entries WHERE country_code='zz'")
+            assert cur.fetchall() == [(999,)]
+
+
+class TestTopTracksAndBatchedShare:
+    def _chart(self, cur, code, entries, snapshot=date(2026, 1, 1)):
+        cur.execute(
+            "INSERT INTO countries (code, name) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+            (code, code.upper()),
+        )
+        for i, (artist, track, streams) in enumerate(entries, start=1):
+            cur.execute(
+                """
+                INSERT INTO chart_entries (country_code, snapshot_date, position,
+                                           artist_name, track_name, daily_streams)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (code, snapshot, i, artist, track, streams),
+            )
+            cur.execute(
+                "INSERT INTO artists (artist_name) VALUES (%s) ON CONFLICT DO NOTHING",
+                (artist,),
+            )
+
+    def test_top_tracks_ordered_by_chart_position(self, pg_database_url):
+        init_db()
+        with get_connection() as conn, conn.cursor() as cur:
+            self._chart(
+                cur, "zz",
+                [("A", "First", 300), ("B", "Second", 200), ("C", "Third", 100)],
+            )
+
+        from app.services.countries import get_country_detail
+
+        tracks = get_country_detail("zz")["top_tracks"]
+        assert [t["track"] for t in tracks] == ["First", "Second", "Third"]
+        assert tracks[0]["daily_streams"] == 300
+        assert tracks[0]["artist"] == "A"
+
+    def test_track_limit_is_respected(self, pg_database_url):
+        init_db()
+        with get_connection() as conn, conn.cursor() as cur:
+            self._chart(cur, "zz", [(f"A{i}", f"T{i}", 10) for i in range(30)])
+
+        from app.services.countries import get_country_detail
+
+        assert len(get_country_detail("zz", track_limit=5)["top_tracks"]) == 5
+
+    def test_summary_carries_domestic_share_for_every_country_in_one_query(
+        self, pg_database_url
+    ):
+        init_db()
+        with get_connection() as conn, conn.cursor() as cur:
+            self._chart(cur, "aa", [("Local", "x", 90), ("Foreign", "y", 10)])
+            self._chart(cur, "bb", [("Foreign", "z", 100)])
+            cur.execute(
+                "UPDATE artists SET origin_country='aa', resolved_at=now() "
+                "WHERE artist_name='Local'"
+            )
+            cur.execute(
+                "UPDATE artists SET origin_country='us', resolved_at=now() "
+                "WHERE artist_name='Foreign'"
+            )
+
+        from app.services.countries import get_country_summaries
+
+        by_code = {s["code"]: s for s in get_country_summaries()}
+        # Grouped query, not one per country - the map colours 76 shapes by
+        # this and per-country would rebuild the N+1 the endpoint removed.
+        assert by_code["aa"]["domestic_share"]["domestic_percentage"] == pytest.approx(90.0)
+        # bb charts only a foreign artist, so 0 percent domestic is a real
+        # measurement here, not missing data.
+        assert by_code["bb"]["domestic_share"]["domestic_percentage"] == pytest.approx(0.0)
+
+    def test_summary_share_is_none_for_countries_with_no_resolved_origins(
+        self, pg_database_url
+    ):
+        init_db()
+        with get_connection() as conn, conn.cursor() as cur:
+            self._chart(cur, "zz", [("Unknown", "t", 50)])
+
+        from app.services.countries import get_country_summaries
+
+        (summary,) = get_country_summaries()
+        assert summary["domestic_share"] is None
+
+
+class TestHiddenGemsAndGlobalArtists:
+    def _chart(self, cur, code, entries, snapshot=date(2026, 1, 1)):
+        cur.execute(
+            "INSERT INTO countries (code, name) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+            (code, code.upper()),
+        )
+        for i, (artist, streams) in enumerate(entries, start=1):
+            cur.execute(
+                "INSERT INTO chart_entries (country_code, snapshot_date, position,"
+                " artist_name, track_name, daily_streams) VALUES (%s,%s,%s,%s,%s,%s)",
+                (code, snapshot, i, artist, f"t{i}", streams),
+            )
+            cur.execute(
+                "INSERT INTO artists (artist_name) VALUES (%s) ON CONFLICT DO NOTHING",
+                (artist,),
+            )
+
+    def test_global_superstar_cannot_be_a_hidden_gem(self, pg_database_url):
+        init_db()
+        with get_connection() as conn, conn.cursor() as cur:
+            # Superstar charts everywhere with huge numbers; Local charts in
+            # one country with far fewer. Each country loaded in one call -
+            # positions restart at 1 per call and are part of the key.
+            self._chart(cur, "aa", [("Superstar", 1_000_000), ("Local", 5_000)])
+            self._chart(cur, "bb", [("Superstar", 1_000_000)])
+            self._chart(cur, "cc", [("Superstar", 1_000_000)])
+
+        from app.services.countries import get_country_detail
+
+        gems = get_country_detail("aa")["hidden_gems"]
+        names = [g["artist"] for g in gems]
+        # Superstar charts in every country, so LN(3/3)=0 - excluded by
+        # construction rather than by any blocklist, despite 200x the streams.
+        assert "Superstar" not in names
+        assert names == ["Local"]
+
+    def test_gem_reach_is_reported_so_the_claim_is_checkable(self, pg_database_url):
+        init_db()
+        with get_connection() as conn, conn.cursor() as cur:
+            self._chart(cur, "aa", [("Wide", 100), ("Narrow", 90)])
+            self._chart(cur, "bb", [("Wide", 100)])
+            self._chart(cur, "cc", [("Wide", 100)])
+
+        from app.services.countries import get_country_detail
+
+        (gem,) = [g for g in get_country_detail("aa")["hidden_gems"]]
+        assert gem["artist"] == "Narrow"
+        assert gem["country_count"] == 1
+        assert gem["total_countries"] == 3
+
+    def test_streams_are_summed_across_an_artists_chart_positions(self, pg_database_url):
+        # An artist can hold several positions at once; ranking on one row
+        # would under-count anyone with two hits.
+        init_db()
+        with get_connection() as conn, conn.cursor() as cur:
+            self._chart(cur, "aa", [("Two Hits", 50), ("Two Hits", 60), ("One Hit", 100)])
+            self._chart(cur, "bb", [("Filler", 10)])
+
+        from app.services.countries import get_country_detail
+
+        gems = {g["artist"]: g["streams"] for g in get_country_detail("aa")["hidden_gems"]}
+        assert gems["Two Hits"] == 110
+
+    def test_global_artists_rank_by_worldwide_streams(self, pg_database_url):
+        init_db()
+        with get_connection() as conn, conn.cursor() as cur:
+            # Broad charts modestly in three countries; Narrow dominates one.
+            self._chart(cur, "aa", [("Broad", 100), ("Narrow", 250)])
+            self._chart(cur, "bb", [("Broad", 100)])
+            self._chart(cur, "cc", [("Broad", 100)])
+
+        from app.services.countries import get_global_artists
+
+        by_artist = {a["artist"]: a for a in get_global_artists()}
+        assert by_artist["Broad"]["streams"] == 300
+        assert by_artist["Broad"]["country_count"] == 3
+        assert by_artist["Narrow"]["country_count"] == 1
+
+    def test_delta_is_none_until_a_second_snapshot_exists(self, pg_database_url):
+        init_db()
+        with get_connection() as conn, conn.cursor() as cur:
+            self._chart(cur, "aa", [("A", 100)])
+
+        from app.services.countries import get_global_artists
+
+        # None, not 0 - "unchanged" and "nothing to compare" differ.
+        assert get_global_artists()[0]["delta"] is None
+
+    def test_delta_compares_against_the_previous_snapshot(self, pg_database_url):
+        init_db()
+        with get_connection() as conn, conn.cursor() as cur:
+            self._chart(cur, "aa", [("A", 100)], date(2026, 1, 1))
+            self._chart(cur, "aa", [("A", 175)], date(2026, 1, 2))
+
+        from app.services.countries import get_global_artists
+
+        artist = get_global_artists()[0]
+        assert artist["streams"] == 175
+        assert artist["delta"] == 75
+
+
 class TestCountryDetail:
     def test_percentages_sum_to_one_hundred_with_other_slice(self, pg_database_url):
         init_db()
