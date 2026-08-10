@@ -85,6 +85,24 @@ def load_country(cur, code: str, name: str, record: dict, snapshot_date: date) -
             ),
         )
 
+    for genre, artists in record.get("artists_by_genre", {}).items():
+        for artist_name in artists:
+            cur.execute(
+                """
+                INSERT INTO country_artist_genres
+                    (country_code, genre, artist_name, snapshot_date)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+                """,
+                (code, genre, artist_name, snapshot_date),
+            )
+        # Every genre seen becomes a reference row, so
+        # run_extract_genre_info has a worklist even before descriptions
+        # exist and a join against `genres` never drops a genre.
+        cur.execute(
+            "INSERT INTO genres (genre) VALUES (%s) ON CONFLICT DO NOTHING", (genre,)
+        )
+
     for rank, artist_name in enumerate(record.get("top_artists", []), start=1):
         cur.execute(
             """

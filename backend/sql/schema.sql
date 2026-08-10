@@ -89,6 +89,35 @@ CREATE TABLE IF NOT EXISTS artists (
     resolved_at TIMESTAMPTZ
 );
 
+-- Which artists caused a genre to score in a country. A bridge table between
+-- the country_genre_scores aggregate and the artists behind it - the link is
+-- computed inside cleansing.merge_genre_signals and was previously discarded
+-- the moment the totals were added up, so "who makes Japan's j-pop" needed
+-- re-running the whole aggregation to answer.
+CREATE TABLE IF NOT EXISTS country_artist_genres (
+    country_code TEXT NOT NULL REFERENCES countries (code),
+    genre TEXT NOT NULL,
+    artist_name TEXT NOT NULL,
+    snapshot_date DATE NOT NULL,
+    PRIMARY KEY (country_code, genre, artist_name, snapshot_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_country_artist_genres_lookup
+    ON country_artist_genres (country_code, genre, snapshot_date);
+
+-- Genre reference data (descriptions), from Last.fm's tag.getInfo. Separate
+-- from the taxonomy in seeds/genre_buckets.txt because that's a curated list
+-- this project controls, whereas this is fetched prose that may be missing
+-- for a given genre.
+CREATE TABLE IF NOT EXISTS genres (
+    genre TEXT PRIMARY KEY,
+    summary TEXT,
+    url TEXT,
+    -- Set even when no description was found, so later runs don't re-spend
+    -- API calls retrying the same permanent blanks.
+    resolved_at TIMESTAMPTZ
+);
+
 -- THE fact table: one row per track per country per day, carrying additive
 -- measures (streams) rather than a score this project invented.
 --

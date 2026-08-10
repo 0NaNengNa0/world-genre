@@ -101,6 +101,17 @@ def genre_pipeline():
         main()
 
     @task
+    def enrich_genres():
+        """Genre descriptions from Last.fm's tag.getInfo.
+
+        Bounded by the taxonomy (~150 buckets) rather than by chart size, and
+        cached to disk, so this is a one-time cost that later runs skip
+        entirely.
+        """
+        from scripts.run_extract_genre_info import main
+        main()
+
+    @task
     def enrich_artists():
         """Fills the artists dimension (origin country, formation year).
 
@@ -121,6 +132,7 @@ def genre_pipeline():
     schema = ensure_schema()
     loaded = load()
     enriched = enrich_artists()
+    genre_info = enrich_genres()
 
     [kworb, lastfm] >> musicbrainz
     [kworb, lastfm] >> deezer
@@ -129,7 +141,7 @@ def genre_pipeline():
     # output to know what's missing.
     deezer >> wikidata
     [kworb, lastfm, musicbrainz] >> cleansed
-    [cleansed, schema] >> loaded >> enriched
+    [cleansed, schema] >> loaded >> [enriched, genre_info]
 
 
 genre_pipeline()

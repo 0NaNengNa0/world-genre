@@ -84,6 +84,38 @@ export type GlobalArtist = {
   origin_country: string | null
 }
 
+export type GenreArtist = {
+  artist: string
+  /** Null when linked by tags but not currently charting. */
+  streams: number | null
+  best_position: number | null
+}
+
+export type GenreDetail = {
+  genre: string
+  country_code: string
+  country_name: string
+  /** Null for genres Last.fm has no wiki entry for. */
+  summary: string | null
+  url: string | null
+  score: number | null
+  distinctiveness: number | null
+  artists: GenreArtist[]
+}
+
+export async function fetchGenreDetail(
+  code: string,
+  genre: string,
+): Promise<GenreDetail> {
+  const response = await fetch(
+    `/api/countries/${code}/genres/${encodeURIComponent(genre)}`,
+  )
+  if (!response.ok) {
+    throw new Error(`Failed to fetch ${genre} (${response.status})`)
+  }
+  return (await response.json()) as GenreDetail
+}
+
 export async function fetchGlobalArtists(): Promise<GlobalArtist[]> {
   const response = await fetch('/api/artists/global')
   if (!response.ok) {

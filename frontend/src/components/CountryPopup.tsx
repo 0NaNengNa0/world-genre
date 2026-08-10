@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react'
 
 import type { CountrySummary } from '../api/countries'
-import { flagEmoji } from '../lib/flag'
+import { CountryFlag } from './CountryFlag'
 
 type Props = {
   country: CountrySummary
@@ -32,7 +32,7 @@ export function CountryPopup({ country, onClose, onSeeMore }: Props) {
     <aside className="popup" role="dialog" aria-label={`${country.name} summary`}>
       <header className="popup__header">
         <h2 className="popup__title">
-          <span aria-hidden="true">{flagEmoji(country.code)}</span> {country.name}
+          <CountryFlag code={country.code} /> {country.name}
         </h2>
         <button
           ref={closeRef}

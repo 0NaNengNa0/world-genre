@@ -125,8 +125,74 @@ _GLOBAL_ARTISTS_SQL = (
     DATA_DIR.parent / "sql" / "queries" / "global_artists.sql"
 ).read_text()
 
+_GENRE_ARTISTS_SQL = (
+    DATA_DIR.parent / "sql" / "queries" / "genre_artists.sql"
+).read_text()
+
 DETAIL_GEM_LIMIT = 10
 GLOBAL_ARTIST_LIMIT = 40
+GENRE_ARTIST_LIMIT = 12
+
+
+def get_genre_detail(code: str, genre: str, limit: int = GENRE_ARTIST_LIMIT) -> dict | None:
+    """One genre within one country: what it is, and who plays it there.
+
+    Returns None only when the country itself is unknown. A genre with no
+    linked artists still returns a result - that's a real state for a genre
+    that scored via a source the link table doesn't cover, and an empty list
+    says so more honestly than a 404.
+    """
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT code, name FROM countries WHERE code = %s", (code,))
+            row = cur.fetchone()
+            if row is None:
+                return None
+            country_code, country_name = row
+
+            cur.execute(
+                "SELECT summary, url FROM genres WHERE genre = %s", (genre,)
+            )
+            info = cur.fetchone()
+
+            cur.execute(
+                _GENRE_ARTISTS_SQL,
+                {"code": country_code, "genre": genre, "limit": limit},
+            )
+            artists = [
+                {
+                    "artist": r[0],
+                    "streams": int(r[1]) if r[1] is not None else None,
+                    "best_position": r[2],
+                }
+                for r in cur.fetchall()
+            ]
+
+            # The genre's own share of this country's listening, so the panel
+            # can say how big it actually is rather than just listing names.
+            cur.execute(
+                """
+                SELECT score, distinctiveness FROM country_genre_scores
+                WHERE country_code = %s AND genre = %s
+                  AND snapshot_date = (
+                      SELECT MAX(snapshot_date) FROM country_genre_scores
+                      WHERE country_code = %s
+                  )
+                """,
+                (country_code, genre, country_code),
+            )
+            score_row = cur.fetchone()
+
+    return {
+        "genre": genre,
+        "country_code": country_code,
+        "country_name": country_name,
+        "summary": info[0] if info else None,
+        "url": info[1] if info else None,
+        "score": score_row[0] if score_row else None,
+        "distinctiveness": float(score_row[1]) if score_row else None,
+        "artists": artists,
+    }
 
 
 def get_global_artists(limit: int = GLOBAL_ARTIST_LIMIT) -> list[dict]:

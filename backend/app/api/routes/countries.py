@@ -4,12 +4,14 @@ from app.schemas.countries import (
     CountriesResponse,
     CountryDetail,
     CountrySummary,
+    GenreDetail,
     GlobalArtist,
     GlobalArtistsResponse,
 )
 from app.services.countries import (
     get_country_detail,
     get_country_summaries,
+    get_genre_detail,
     get_global_artists,
 )
 
@@ -53,3 +55,22 @@ def get_country(
         # country" from "never loaded", and both are genuinely absent here.
         raise HTTPException(status_code=404, detail=f"Unknown country code: {code}")
     return CountryDetail(**detail)
+
+
+@router.get("/countries/{code}/genres/{genre}", response_model=GenreDetail)
+def country_genre(
+    code: str,
+    genre: str,
+    limit: int = Query(12, ge=1, le=100),
+) -> GenreDetail:
+    """One genre within one country - its description and example artists.
+
+    Declared after /countries/{code} so the more specific path still matches;
+    FastAPI routes in declaration order, and a bare {code} would otherwise
+    swallow nothing here (different segment count) but keeping them adjacent
+    makes the relationship obvious.
+    """
+    detail = get_genre_detail(code.lower(), genre.lower(), limit)
+    if detail is None:
+        raise HTTPException(status_code=404, detail=f"Unknown country code: {code}")
+    return detail

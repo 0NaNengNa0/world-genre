@@ -8,6 +8,10 @@ type Props = {
    *  per mode: no genres at all is a data gap, whereas no *distinctive*
    *  genres is a real finding about the country. */
   emptyMessage?: string
+  /** When provided, legend rows become buttons that drill into a genre. The
+   *  "other" slice stays inert - it's an aggregate, not a genre. */
+  onSelectGenre?: (genre: string) => void
+  selectedGenre?: string | null
 }
 
 /**
@@ -39,6 +43,8 @@ export function GenrePieChart({
   otherPercentage,
   otherGenreCount,
   emptyMessage = 'No genre data for this country yet.',
+  onSelectGenre,
+  selectedGenre,
 }: Props) {
   const slices = [
     ...genres.map((g, i) => ({
@@ -100,17 +106,44 @@ export function GenrePieChart({
       </svg>
 
       <ul className="legend">
-        {slices.map((slice) => (
-          <li key={slice.key} className="legend__item">
-            <span
-              className="legend__swatch"
-              style={{ backgroundColor: slice.color }}
-              aria-hidden="true"
-            />
-            <span className="legend__label">{slice.label}</span>
-            <span className="legend__value">{slice.percentage.toFixed(1)}%</span>
-          </li>
-        ))}
+        {slices.map((slice) => {
+          const isOther = slice.key === '__other__'
+          // "other" is a rollup of everything not shown, so there's no single
+          // genre to open - it stays plain text while the rest become buttons.
+          const clickable = Boolean(onSelectGenre) && !isOther
+          const content = (
+            <>
+              <span
+                className="legend__swatch"
+                style={{ backgroundColor: slice.color }}
+                aria-hidden="true"
+              />
+              <span className="legend__label">{slice.label}</span>
+              <span className="legend__value">{slice.percentage.toFixed(1)}%</span>
+            </>
+          )
+
+          return (
+            <li key={slice.key}>
+              {clickable ? (
+                <button
+                  type="button"
+                  className={
+                    slice.label === selectedGenre
+                      ? 'legend__item legend__item--button legend__item--on'
+                      : 'legend__item legend__item--button'
+                  }
+                  onClick={() => onSelectGenre?.(slice.label)}
+                  aria-label={`Show artists and description for ${slice.label}`}
+                >
+                  {content}
+                </button>
+              ) : (
+                <span className="legend__item">{content}</span>
+              )}
+            </li>
+          )
+        })}
       </ul>
     </div>
   )

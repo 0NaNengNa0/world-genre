@@ -90,6 +90,133 @@ def parse_bindings(payload: dict, width: int = DEFAULT_THUMBNAIL_WIDTH) -> dict[
     return images
 
 
+# P434 MusicBrainz id, P495 country of origin (bands), P27 country of
+# citizenship (people), P297 ISO 3166-1 alpha-2, P571 inception (formation).
+_META_BY_MBID_TEMPLATE = """SELECT ?mbid ?iso ?inception WHERE {{
+  VALUES ?mbid {{ {values} }}
+  ?item wdt:P434 ?mbid .
+  OPTIONAL {{ ?item wdt:P495/wdt:P297 ?isoOrigin . }}
+  OPTIONAL {{ ?item wdt:P27/wdt:P297 ?isoCitizen . }}
+  OPTIONAL {{ ?item wdt:P571 ?inception . }}
+  BIND(COALESCE(?isoOrigin, ?isoCitizen) AS ?iso)
+}}"""
+
+# Label matching, for artists with no known MBID. Restricted to musicians and
+# musical ensembles, because bare labels collide constantly - "Alaska" is a
+# US state, a Spanish singer and a dozen other things.
+_META_BY_NAME_TEMPLATE = """SELECT ?name ?item ?iso ?inception WHERE {{
+  VALUES ?name {{ {values} }}
+  ?item rdfs:label ?name .
+  {{ ?item wdt:P31 wd:Q5 ; wdt:P106/wdt:P279* wd:Q639669 . }}
+  UNION
+  {{ ?item wdt:P31/wdt:P279* wd:Q2088357 . }}
+  OPTIONAL {{ ?item wdt:P495/wdt:P297 ?isoOrigin . }}
+  OPTIONAL {{ ?item wdt:P27/wdt:P297 ?isoCitizen . }}
+  OPTIONAL {{ ?item wdt:P571 ?inception . }}
+  BIND(COALESCE(?isoOrigin, ?isoCitizen) AS ?iso)
+}}"""
+
+
+def _year(value: str | None) -> int | None:
+    """Leading year from a Wikidata date literal ("1985-06-21T00:00:00Z")."""
+    if not value:
+        return None
+    head = value.lstrip("+")[:4]
+    return int(head) if head.isdigit() else None
+
+
+def build_meta_by_mbid_sparql(mbids: list[str]) -> str:
+    return _META_BY_MBID_TEMPLATE.format(values=" ".join(f'"{m}"' for m in mbids))
+
+
+def build_meta_by_name_sparql(names: list[str]) -> str:
+    # Escape quotes and backslashes; artist names contain both ("Weird Al"
+    # Yankovic, AC\\DC-style oddities) and an unescaped one breaks the query.
+    literals = []
+    for name in names:
+        safe = name.replace("\\", "\\\\").replace('"', '\\"')
+        literals.append(f'"{safe}"@en')
+    return _META_BY_NAME_TEMPLATE.format(values=" ".join(literals))
+
+
+def parse_meta_by_mbid(payload: dict) -> dict[str, dict]:
+    """SPARQL results -> {mbid: {"country", "formed_year"}}."""
+    out: dict[str, dict] = {}
+    for row in payload.get("results", {}).get("bindings", []):
+        mbid = row.get("mbid", {}).get("value")
+        if not mbid:
+            continue
+        iso = row.get("iso", {}).get("value")
+        entry = out.setdefault(mbid, {"country": None, "formed_year": None})
+        # An artist can have several citizenships or origins; first wins so
+        # repeated runs give the same answer.
+        if iso and not entry["country"]:
+            entry["country"] = iso.lower()
+        if not entry["formed_year"]:
+            entry["formed_year"] = _year(row.get("inception", {}).get("value"))
+    return out
+
+
+def parse_meta_by_name(payload: dict) -> dict[str, dict]:
+    """SPARQL results -> {name: {...}}, dropping ambiguous labels.
+
+    A label matching more than one Wikidata entity is thrown away rather than
+    guessed at. Picking arbitrarily would quietly attribute one artist's
+    nationality to another, and a wrong country is worse than a missing one -
+    it silently corrupts the domestic-share figure instead of just lowering
+    its coverage.
+    """
+    items_per_name: dict[str, set[str]] = {}
+    rows_per_name: dict[str, dict] = {}
+
+    for row in payload.get("results", {}).get("bindings", []):
+        name = row.get("name", {}).get("value")
+        item = row.get("item", {}).get("value")
+        if not name or not item:
+            continue
+        items_per_name.setdefault(name, set()).add(item)
+        entry = rows_per_name.setdefault(name, {"country": None, "formed_year": None})
+        iso = row.get("iso", {}).get("value")
+        if iso and not entry["country"]:
+            entry["country"] = iso.lower()
+        if not entry["formed_year"]:
+            entry["formed_year"] = _year(row.get("inception", {}).get("value"))
+
+    return {
+        name: meta
+        for name, meta in rows_per_name.items()
+        if len(items_per_name.get(name, ())) == 1
+    }
+
+
+def _run_sparql(query: str, timeout: int = 60) -> dict:
+    response = requests.post(
+        SPARQL_ENDPOINT,
+        data={"query": query},
+        headers={
+            "User-Agent": USER_AGENT,
+            "Accept": "application/sparql-results+json",
+        },
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def fetch_meta_by_mbids(mbids: list[str], timeout: int = 60) -> dict[str, dict]:
+    """Origin country and formation year for a batch of MusicBrainz ids."""
+    if not mbids:
+        return {}
+    return parse_meta_by_mbid(_run_sparql(build_meta_by_mbid_sparql(mbids), timeout))
+
+
+def fetch_meta_by_names(names: list[str], timeout: int = 60) -> dict[str, dict]:
+    """Same, matched on artist name. Ambiguous names are omitted."""
+    if not names:
+        return {}
+    return parse_meta_by_name(_run_sparql(build_meta_by_name_sparql(names), timeout))
+
+
 def fetch_images(
     mbids: list[str],
     width: int = DEFAULT_THUMBNAIL_WIDTH,

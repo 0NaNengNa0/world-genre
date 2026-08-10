@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 
 import { fetchTrendingGenres, type CountrySummary, type TrendingGenre } from '../api/countries'
-import { flagEmoji } from '../lib/flag'
+import { CountryFlag } from './CountryFlag'
 
 type Props = {
   countries: CountrySummary[]
@@ -29,8 +29,10 @@ export function TrendingPanel({ countries }: Props) {
     }
   }, [])
 
+  // Falls back to the raw code only if a country somehow isn't in the loaded
+  // list - which shouldn't happen, since both come from the same pipeline.
   const nameOf = (code: string) =>
-    countries.find((c) => c.code === code)?.name ?? code.toUpperCase()
+    countries.find((c) => c.code === code)?.name ?? code
 
   if (error) return <p className="notice notice--error">{error}</p>
   if (!genres) return <p className="notice">Loading trends…</p>
@@ -50,8 +52,8 @@ export function TrendingPanel({ countries }: Props) {
 
   const row = (g: TrendingGenre) => (
     <li key={`${g.country_code}-${g.genre}`} className="trend__item">
-      <span className="trend__flag" aria-hidden="true">
-        {flagEmoji(g.country_code)}
+      <span className="trend__flag">
+        <CountryFlag code={g.country_code} />
       </span>
       <span className="trend__country">{nameOf(g.country_code)}</span>
       <span className="chip">{g.genre}</span>

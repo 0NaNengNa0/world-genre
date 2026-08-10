@@ -4,6 +4,8 @@ Auth: API key only, no OAuth. Get one at https://www.last.fm/api/account/create.
 
 Pure functions. Callers pass in the api_key and get back Python data.
 """
+import re
+
 import requests
 
 BASE_URL = "http://ws.audioscrobbler.com/2.0/"
@@ -35,6 +37,39 @@ def get_top_artists(api_key: str, country_name: str, limit: int = 50) -> list[di
         }
         for a in data.get("topartists", {}).get("artist", [])
     ]
+
+
+def get_tag_info(api_key: str, tag: str) -> dict | None:
+    """A genre's short description, or None if Last.fm has no wiki for it.
+
+    Uses tag.getInfo, which returns a short "summary" and a longer "content".
+    Only the summary is kept - the content runs to several paragraphs and this
+    is a caption, not an article.
+
+    The summary carries a trailing "Read more on Last.fm" link in HTML; it's
+    stripped here rather than in the UI, so the stored text is clean whatever
+    consumes it. Returns None (not an empty dict) when there's no wiki at all,
+    which is common for narrower genres.
+    """
+    data = _call(api_key, "tag.getinfo", tag=tag)
+    wiki = (data.get("tag") or {}).get("wiki") or {}
+    summary = (wiki.get("summary") or "").strip()
+    if not summary:
+        return None
+
+    # The summary is HTML: prose followed by <a href="...">Read more on
+    # Last.fm</a>. Cutting at the anchor leaves the sentence intact.
+    text = re.split(r"<a\s", summary, maxsplit=1)[0]
+    text = re.sub(r"<[^>]+>", "", text).strip()
+    # Last.fm ends the truncated summary with a bare ellipsis or spaces.
+    text = text.rstrip(" .\n") + "." if text else ""
+    if not text:
+        return None
+
+    return {
+        "summary": text,
+        "url": (data.get("tag") or {}).get("url"),
+    }
 
 
 def get_top_tags(api_key: str, artist_name: str) -> list[dict]:

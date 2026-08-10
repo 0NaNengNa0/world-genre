@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 
 import { fetchCountryDetail, type CountryDetail } from '../api/countries'
-import { flagEmoji } from '../lib/flag'
+import { CountryFlag } from './CountryFlag'
+import { GenreDetailPanel } from './GenreDetailPanel'
 import { GenrePieChart } from './GenrePieChart'
 
 type Mode = 'popularity' | 'distinctiveness'
@@ -33,12 +34,14 @@ export function CountryDetailModal({ code, fallbackName, onClose }: Props) {
   const [detail, setDetail] = useState<CountryDetail | null>(null)
   const [error, setError] = useState('')
   const [mode, setMode] = useState<Mode>('popularity')
+  const [selectedGenre, setSelectedGenre] = useState<string | null>(null)
   const closeRef = useRef<HTMLButtonElement>(null)
 
   useEffect(() => {
     let cancelled = false
     setDetail(null)
     setError('')
+    setSelectedGenre(null)
 
     fetchCountryDetail(code)
       .then((data) => {
@@ -87,7 +90,7 @@ export function CountryDetailModal({ code, fallbackName, onClose }: Props) {
       >
         <header className="detail__header">
           <h2 className="detail__title">
-            <span aria-hidden="true">{flagEmoji(code)}</span>{' '}
+            <CountryFlag code={code} />{' '}
             {detail?.name ?? fallbackName}
           </h2>
           <button
@@ -135,7 +138,19 @@ export function CountryDetailModal({ code, fallbackName, onClose }: Props) {
                     ? "Nothing here stands out — this country's genres are all ones most other countries listen to as well."
                     : 'No genre data for this country yet.'
                 }
+                onSelectGenre={setSelectedGenre}
+                selectedGenre={selectedGenre}
               />
+
+              {selectedGenre ? (
+                <GenreDetailPanel
+                  countryCode={code}
+                  genre={selectedGenre}
+                  onClose={() => setSelectedGenre(null)}
+                />
+              ) : (
+                <p className="detail__caption">Click a genre to see what it is and who plays it here.</p>
+              )}
 
               <p className="detail__caption">
                 {MODES.find((m) => m.id === mode)?.caption}

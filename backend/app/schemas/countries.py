@@ -116,6 +116,29 @@ class GlobalArtistsResponse(BaseModel):
     artists: list[GlobalArtist]
 
 
+class GenreArtist(BaseModel):
+    artist: str
+    # None when the artist is linked to this genre by tags but isn't on the
+    # current chart - still a valid example, just not measurable today.
+    streams: int | None = None
+    best_position: int | None = None
+
+
+class GenreDetail(BaseModel):
+    """One genre as it exists in one country: what it is, and who plays it."""
+
+    genre: str
+    country_code: str
+    country_name: str
+    # From Last.fm's tag.getInfo. None for genres it has no wiki entry for,
+    # which is common for narrower ones.
+    summary: str | None = None
+    url: str | None = None
+    score: int | None = None
+    distinctiveness: float | None = None
+    artists: list[GenreArtist] = []
+
+
 class CountryDetail(BaseModel):
     """One country in depth - the click-through from a grid card."""
 

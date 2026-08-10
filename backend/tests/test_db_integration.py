@@ -476,6 +476,107 @@ class TestHiddenGemsAndGlobalArtists:
         assert artist["delta"] == 75
 
 
+class TestGenreDetail:
+    def _setup(self, cur):
+        cur.execute(
+            "INSERT INTO countries (code, name) VALUES ('zz','Testland') "
+            "ON CONFLICT DO NOTHING"
+        )
+        snapshot = date(2026, 1, 1)
+        # Two artists tagged j-pop, one of them charting far higher.
+        for artist, streams in [("Big Act", 900), ("Small Act", 100)]:
+            cur.execute(
+                "INSERT INTO chart_entries (country_code, snapshot_date, position,"
+                " artist_name, daily_streams) VALUES ('zz',%s,%s,%s,%s)",
+                (snapshot, 1 if artist == "Big Act" else 2, artist, streams),
+            )
+        for artist in ["Big Act", "Small Act", "Not Charting"]:
+            cur.execute(
+                "INSERT INTO country_artist_genres (country_code, genre, artist_name,"
+                " snapshot_date) VALUES ('zz','j-pop',%s,%s)",
+                (artist, snapshot),
+            )
+        cur.execute(
+            "INSERT INTO genres (genre, summary, url, resolved_at)"
+            " VALUES ('j-pop','Japanese popular music.','http://x',now())"
+        )
+
+    def test_artists_ranked_by_streams(self, pg_database_url):
+        init_db()
+        with get_connection() as conn, conn.cursor() as cur:
+            self._setup(cur)
+
+        from app.services.countries import get_genre_detail
+
+        detail = get_genre_detail("zz", "j-pop")
+        assert [a["artist"] for a in detail["artists"]] == [
+            "Big Act",
+            "Small Act",
+            "Not Charting",
+        ]
+        assert detail["artists"][0]["streams"] == 900
+
+    def test_non_charting_artists_are_kept_with_null_streams(self, pg_database_url):
+        # The genre link comes from tags, which cover artists who aren't on
+        # today's chart. They're still valid examples of the genre - an INNER
+        # JOIN would silently drop them.
+        init_db()
+        with get_connection() as conn, conn.cursor() as cur:
+            self._setup(cur)
+
+        from app.services.countries import get_genre_detail
+
+        last = get_genre_detail("zz", "j-pop")["artists"][-1]
+        assert last["artist"] == "Not Charting"
+        assert last["streams"] is None
+
+    def test_includes_the_description(self, pg_database_url):
+        init_db()
+        with get_connection() as conn, conn.cursor() as cur:
+            self._setup(cur)
+
+        from app.services.countries import get_genre_detail
+
+        detail = get_genre_detail("zz", "j-pop")
+        assert detail["summary"] == "Japanese popular music."
+        assert detail["url"] == "http://x"
+
+    def test_genre_without_a_description_still_returns_artists(self, pg_database_url):
+        init_db()
+        with get_connection() as conn, conn.cursor() as cur:
+            self._setup(cur)
+            cur.execute(
+                "INSERT INTO country_artist_genres (country_code, genre, artist_name,"
+                " snapshot_date) VALUES ('zz','rock','Big Act',%s)",
+                (date(2026, 1, 1),),
+            )
+
+        from app.services.countries import get_genre_detail
+
+        detail = get_genre_detail("zz", "rock")
+        assert detail["summary"] is None
+        assert [a["artist"] for a in detail["artists"]] == ["Big Act"]
+
+    def test_unknown_genre_returns_an_empty_list_not_an_error(self, pg_database_url):
+        init_db()
+        with get_connection() as conn, conn.cursor() as cur:
+            self._setup(cur)
+
+        from app.services.countries import get_genre_detail
+
+        # A 404 would imply the country is wrong; an empty list correctly says
+        # this genre simply has nothing linked here.
+        detail = get_genre_detail("zz", "polka")
+        assert detail is not None
+        assert detail["artists"] == []
+
+    def test_unknown_country_returns_none(self, pg_database_url):
+        init_db()
+        from app.services.countries import get_genre_detail
+
+        assert get_genre_detail("qq", "j-pop") is None
+
+
 class TestCountryDetail:
     def test_percentages_sum_to_one_hundred_with_other_slice(self, pg_database_url):
         init_db()

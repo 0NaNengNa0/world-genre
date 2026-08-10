@@ -125,17 +125,37 @@ ul {
   transform: translateY(-2px);
 }
 
+/* 4:3 rather than 16:9. The source photos are square, and now that they're
+   shown uncropped the taller frame gives the subject most of the space -
+   16:9 left a small square marooned in blur. */
 .card__cover {
   position: relative;
-  aspect-ratio: 16 / 9;
+  aspect-ratio: 4 / 3;
   background: var(--surface-2);
   overflow: hidden;
 }
 
-.card__cover-img {
+/* Blurred copy of the artist photo, filling the 16:9 box behind the sharp
+   one. Scaled up because a blur samples past the element's edges and would
+   otherwise show translucent borders. */
+.card__cover-backdrop {
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
   object-fit: cover;
+  filter: blur(16px) saturate(1.3);
+  transform: scale(1.2);
+  opacity: 0.5;
+}
+
+/* The sharp image, uncropped. `contain` keeps the whole square photo visible;
+   the backdrop behind it means that costs no empty letterbox bars. */
+.card__cover-img {
+  position: relative;
+  height: 100%;
+  width: 100%;
+  object-fit: contain;
   display: block;
 }
 
@@ -145,13 +165,14 @@ ul {
   background: linear-gradient(135deg, var(--surface-2), var(--surface));
 }
 
+/* Holds the flag image over the cover photo. font-size/text-shadow used to
+   matter here when this was an emoji glyph; the image carries its own shadow
+   now (see .card__flag .flag). */
 .card__flag {
   position: absolute;
   top: 0.6rem;
   left: 0.7rem;
-  font-size: 1.6rem;
-  line-height: 1;
-  text-shadow: 0 2px 6px rgba(0, 0, 0, 0.6);
+  line-height: 0;
 }
 
 .card__header {
@@ -962,4 +983,127 @@ ul {
 .global__num {
   font-variant-numeric: tabular-nums;
   color: var(--text-muted);
+}
+
+/* Country flags as images, not emoji.
+   Emoji flags are regional-indicator pairs that Microsoft's font has never
+   supported, so on Windows they rendered as bare letters ("US", "JP"). An
+   image is identical on every platform. */
+.flag {
+  display: inline-block;
+  vertical-align: -0.1em;
+  border-radius: 2px;
+  /* Flags with white edges (Japan, Poland) would otherwise vanish into a
+     light surface; the hairline keeps their shape readable. */
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.12);
+  object-fit: cover;
+}
+
+.flag--sm {
+  width: 1.15em;
+  height: 0.86em;
+}
+
+.flag--md {
+  width: 1.7rem;
+  height: 1.28rem;
+  vertical-align: middle;
+}
+
+/* The card's flag sits over the cover image, so it needs its own shadow to
+   stay legible against a bright photo. */
+.card__flag .flag {
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.25), 0 2px 6px rgba(0, 0, 0, 0.6);
+}
+
+/* Clickable legend rows (genre drill-down) */
+.legend__item--button {
+  width: 100%;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  padding: 0.15rem 0.3rem;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.legend__item--button:hover {
+  background: var(--surface-2);
+  border-color: var(--border);
+}
+
+.legend__item--button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.legend__item--on {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+/* Genre description + example artists */
+.genre-panel {
+  margin-top: var(--gap);
+  padding: var(--gap);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.genre-panel__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gap);
+  margin-bottom: 0.5rem;
+}
+
+.genre-panel__title {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 600;
+  text-transform: capitalize;
+}
+
+.genre-panel__summary {
+  font-size: 0.85rem;
+  line-height: 1.5;
+  color: var(--text-muted);
+  margin-bottom: var(--gap);
+}
+
+.genre-panel__artists {
+  list-style: none;
+  margin: 0 0 0.5rem;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.genre-panel__artist {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: baseline;
+  gap: 0.6rem;
+  padding: 0.25rem 0.3rem;
+  border-radius: var(--radius-sm);
+  font-size: 0.85rem;
+}
+
+.genre-panel__artist:nth-child(odd) {
+  background: var(--surface);
+}
+
+.genre-panel__link {
+  display: inline-block;
+  margin-top: 0.5rem;
+  font-size: 0.78rem;
+  color: var(--accent);
 }

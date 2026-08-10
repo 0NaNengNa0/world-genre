@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 
 import { fetchGlobalArtists, type GlobalArtist } from '../api/countries'
-import { flagEmoji } from '../lib/flag'
+import { CountryFlag } from './CountryFlag'
 
 /**
  * The biggest artists worldwide, by streams summed across every country's
@@ -51,11 +51,7 @@ export function GlobalArtistsPanel() {
           <li key={a.artist} className="global__row">
             <span className="artists__rank">{i + 1}</span>
             <span className="global__name">
-              {a.origin_country && (
-                <span aria-hidden="true" title={a.origin_country.toUpperCase()}>
-                  {flagEmoji(a.origin_country)}{' '}
-                </span>
-              )}
+              <CountryFlag code={a.origin_country} />{' '}
               {a.artist}
             </span>
             <span className="global__num">{a.country_count}</span>

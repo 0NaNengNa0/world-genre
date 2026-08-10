@@ -114,12 +114,14 @@ def _process_country(country: dict) -> tuple[dict, dict, list[dict]]:
     kworb = _load(KWORB_DIR / f"{code}.json")
 
     genre_stats: dict = {}
+    artists_by_genre: dict[str, set[str]] = {}
     # No top_n - the full distribution is needed so pass 2 can rank the long
     # tail, where the genres that actually differentiate countries live.
     all_genres = cleansing.merge_genre_signals(
         lastfm.get("tags_by_artist", {}),
         musicbrainz.get("genres_by_artist", {}),
         stats=genre_stats,
+        artists_by_genre=artists_by_genre,
     )
 
     artist_names = _artists_from_lastfm(lastfm) or _artists_from_kworb(kworb)
@@ -129,6 +131,11 @@ def _process_country(country: dict) -> tuple[dict, dict, list[dict]]:
         "country_name": name,
         "artist_count": len(artist_names),
         "top_artists": artist_names[:TOP_N_ARTISTS],
+        # Which artists caused each genre to score here. Sorted rather than
+        # left as a set so the JSON is stable between runs and diffable.
+        "artists_by_genre": {
+            genre: sorted(artists) for genre, artists in sorted(artists_by_genre.items())
+        },
     }
     stats = {
         "artist_count": len(artist_names),

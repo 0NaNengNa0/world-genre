@@ -6,7 +6,7 @@ import {
   type CountrySummary,
 } from '../api/countries'
 import { genreDifferences, similarity } from '../lib/compare'
-import { flagEmoji } from '../lib/flag'
+import { CountryFlag } from './CountryFlag'
 
 type Props = {
   countries: CountrySummary[]
@@ -112,10 +112,10 @@ export function ComparePanel({ countries }: Props) {
             <li className="diff__head">
               <span />
               <span>
-                {flagEmoji(left.code)} {left.name}
+                <CountryFlag code={left.code} /> {left.name}
               </span>
               <span>
-                {flagEmoji(right.code)} {right.name}
+                <CountryFlag code={right.code} /> {right.name}
               </span>
               <span>Gap</span>
             </li>

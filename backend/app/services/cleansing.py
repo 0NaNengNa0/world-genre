@@ -159,6 +159,7 @@ def merge_genre_signals(
     musicbrainz_genres_by_artist: dict[str, list[str]],
     top_n: int | None = None,
     stats: dict | None = None,
+    artists_by_genre: dict[str, set[str]] | None = None,
 ) -> list[dict]:
     """Reconciles two independent genre signals into one ranked list -
     this is the real cross-source cleansing step, not just a fallback.
@@ -184,6 +185,14 @@ def merge_genre_signals(
     scripts/run_cleanse.py can compute how *distinctive* each genre is,
     so callers that want a short list should rank first and truncate last.
 
+    If `artists_by_genre` is passed, it's filled in with {genre: {artists}} -
+    which artists actually caused each genre to score. This function is the
+    only place that knows: it reads an artist's tags, normalizes and buckets
+    them, adds to a running total and then moves on, so the link between
+    "Aimyon" and "j-pop" existed only inside the loop. Capturing it here is
+    what lets the API answer "who makes this country's j-pop" without
+    recomputing the whole aggregation.
+
     If `stats` is passed, it's mutated in place with
     {"total_tags", "unclassified_tags", "unclassified_rate"} - how many raw
     tags this call saw, and what fraction were junk/empty (normalize_genre
@@ -202,7 +211,7 @@ def merge_genre_signals(
     total_tags = 0
     unclassified_tags = 0
 
-    for tags in lastfm_tags_by_artist.values():
+    for artist, tags in lastfm_tags_by_artist.items():
         for tag in tags[:5]:
             total_tags += 1
             raw_name = tag.get("name") if isinstance(tag, dict) else None
@@ -221,8 +230,10 @@ def merge_genre_signals(
                 pass
             scores[name] += weight
             sources.setdefault(name, set()).add("lastfm")
+            if artists_by_genre is not None:
+                artists_by_genre.setdefault(name, set()).add(artist)
 
-    for genres in musicbrainz_genres_by_artist.values():
+    for artist, genres in musicbrainz_genres_by_artist.items():
         for raw_name in genres:
             total_tags += 1
             name = normalize_genre(raw_name)
@@ -235,6 +246,8 @@ def merge_genre_signals(
                 continue
             scores[name] += 1
             sources.setdefault(name, set()).add("musicbrainz")
+            if artists_by_genre is not None:
+                artists_by_genre.setdefault(name, set()).add(artist)
 
     if stats is not None:
         stats["total_tags"] = total_tags

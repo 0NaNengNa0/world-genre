@@ -1,5 +1,5 @@
 import type { CountrySummary } from '../api/countries'
-import { flagEmoji } from '../lib/flag'
+import { CountryFlag } from './CountryFlag'
 
 type Props = {
   country: CountrySummary
@@ -20,17 +20,32 @@ export function CountryCard({ country, onSelect }: Props) {
     >
       <div className="card__cover">
         {country.cover_image ? (
-          <img
-            src={country.cover_image}
-            alt=""
-            className="card__cover-img"
-            loading="lazy"
-          />
+          // Two copies of the same image. Artist photos are square (Deezer
+          // serves 250x250, Wikidata thumbnails likewise) while this box is
+          // 16:9, so object-fit:cover was slicing roughly 44 percent of the
+          // height off - which on a portrait means the top of the head. The
+          // blurred copy fills the box, the sharp one sits over it uncropped,
+          // so nothing is lost and there are no empty letterbox bars either.
+          <>
+            <img
+              src={country.cover_image}
+              alt=""
+              aria-hidden="true"
+              className="card__cover-backdrop"
+              loading="lazy"
+            />
+            <img
+              src={country.cover_image}
+              alt=""
+              className="card__cover-img"
+              loading="lazy"
+            />
+          </>
         ) : (
           <div className="card__cover-placeholder" />
         )}
-        <span className="card__flag" aria-hidden="true">
-          {flagEmoji(country.code)}
+        <span className="card__flag">
+          <CountryFlag code={country.code} size="md" />
         </span>
       </div>
 

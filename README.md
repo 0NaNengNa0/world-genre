@@ -142,9 +142,27 @@ Brings up Airflow + the warehouse (`app-postgres`), triggers the `genre_pipeline
 - Warehouse: `postgresql://world_genre:world_genre@localhost:5433/world_genre` (e.g. via `psql` or a GUI client)
 
 ```bash
-npm run dev     # frontend + backend only, skip Airflow (e.g. if it's already running)
-npm run stop    # docker compose down + force-frees ports 5173/8000
+npm run offline    # rebuild the DB from cached data and run the app - NO API calls
+npm run dev        # frontend + backend only, skip Airflow (e.g. if it's already running)
+npm run db:refresh # just the rebuild, without starting the app
+npm run stop       # docker compose down + force-frees ports 5173/8000
 ```
+
+### `npm run offline` — the one to use while building
+
+`npm run start` triggers the Airflow DAG, which runs **every** extractor: Last.fm (a request per country plus one per artist, against your API key), MusicBrainz (~1 req/sec, hours on a cold cache), Deezer, Wikidata and the kworb scrape. That's correct when you want fresh data and completely wrong when you've just changed some CSS.
+
+`npm run offline` starts only `app-postgres` — not Airflow's five containers — then rebuilds the warehouse from the raw files already in `data/raw/`:
+
+```
+run_init_db   schema (idempotent)
+run_cleanse   data/raw/**  ->  data/processed/**
+run_load      data/processed + data/raw/kworb  ->  Postgres
+```
+
+Measured on the full 76-country dataset: **20 seconds, 7,323 chart entries, zero network calls and zero API quota**. Safe to run as often as you like.
+
+It refuses to run with an empty `data/raw` and tells you to do one real `npm run start` first, rather than silently building an empty database.
 
 Both `start` and `dev` free ports 5173 and 8000 first, via npm's `prestart`/`predev` hooks. That isn't belt-and-braces: on Windows, `Ctrl+C` makes cmd.exe ask *"Terminate batch job (Y/N)?"*, and the wrapper can exit while a child still holds its port — so the next run fails to bind and only the run after that works. Clearing the ports up front makes the first attempt the one that works.
 
@@ -303,6 +321,8 @@ lastfm ─┘
 | `countries` | one row per country | code, display name |
 | `country_snapshots` | one row per (country, day) | `artist_count` |
 | `chart_entries` | one row per (country, position, day) | **the fact table** — `artist_name`, `track_name`, `daily/weekly/total_streams`, `days_on_chart`, `peak_position` |
+| `country_artist_genres` | one row per (country, genre, artist, day) | bridge — which artists gave a genre its score |
+| `genres` | one row per genre | reference — `summary`, `url` from Last.fm's `tag.getInfo` |
 | `artists` | one row per artist | dimension — `mbid`, `origin_country`, `formed_year`, `resolved_at` |
 | `country_genre_scores` | one row per (country, genre, day) | `score` (popularity), `distinctiveness` (IDF), `sources` (array) - this is the time series |
 | `country_top_artists` | one row per (country, day, rank) | top 5 artists that day |
@@ -325,7 +345,27 @@ Two decisions worth knowing:
 
 **Coverage is reported alongside the answer.** MusicBrainz doesn't know an origin for every charting artist, so the share is computed over the streams that *can* be attributed — and 40% domestic means something very different at 90% coverage than at 15%. The API returns `coverage_percentage` next to `domestic_percentage`, and returns `null` rather than "0% domestic" when nothing is resolved yet. Reporting the denominator is the difference between a statistic and a guess.
 
-**Enrichment is bounded per run.** Resolving every charting artist would take roughly **6 hours** at 76 countries — MusicBrainz allows ~1 request/second and most chart artists have no known MBID, so they need a name search first (2 calls each). `run_extract_artist_meta.py` therefore resolves at most 250 per run, most-charted first, and records `resolved_at` even on a genuine miss so later runs don't re-spend their budget on the same blanks. The dimension fills in across weekly runs instead of any single run becoming an outage.
+**Enrichment batches, then falls back.** Asking MusicBrainz about each artist individually measured at **4,244 calls ≈ 106 minutes of pure rate-limit waiting**, spread over ten weekly runs before coverage completed — MusicBrainz allows ~1 request/second and most chart artists have no known MBID, so they need a name search first (2 calls each).
+
+Wikidata answers the same question (`P495`/`P27` for country, `P571` for formation) and its SPARQL endpoint accepts a `VALUES` block, so one request covers a whole batch. `run_extract_artist_meta.py` runs three passes, cheapest first:
+
+| Pass | Source | Cost for 2,287 artists |
+| --- | --- | --- |
+| 1 | Wikidata by MusicBrainz ID (exact) | ~12 queries |
+| 2 | Wikidata by artist name (unambiguous only) | included above |
+| 3 | MusicBrainz, capped at 250/run | ~6 min, only for what's left |
+
+The Wikidata passes are bounded by **batch count, not artist count**, so they stay a handful of requests however many countries you add — the part that scaled badly no longer scales at all.
+
+Pass 2 **discards any name matching more than one Wikidata entity** rather than guessing. Picking arbitrarily would attribute one artist's nationality to another, and a wrong country silently corrupts the domestic-share figure, whereas a missing one merely lowers its stated coverage. Artists resolved by any pass get `resolved_at` set, so later runs spend the MusicBrainz budget only on genuinely unknown names.
+
+### Clicking a genre
+
+Every genre in the donut legend opens a panel with a short description and the artists behind it in that country.
+
+The artist list needed data the warehouse was **throwing away**. `cleansing.merge_genre_signals` reads an artist's tags, normalizes and buckets them, adds to a running total and moves on — so the fact that *Aimyon* is why Japan scores `j-pop` existed only inside that loop. It now populates `country_artist_genres`, a bridge table between the aggregate and the artists that produced it. On the 20-country dataset that's ~10,300 links.
+
+Descriptions come from Last.fm's `tag.getInfo` and are cheap by construction: the taxonomy is fixed at ~150 buckets, so unlike the artist extractors this doesn't scale with chart size. Results cache to disk and genres with no wiki entry are still recorded as resolved, so reruns cost **zero** API calls.
 
 ### Genre scoring
 
@@ -335,6 +375,7 @@ Three queries live in `backend/sql/queries/`, runnable directly with `psql "$DAT
 
 - **`country_genre_shares.sql`** — each genre's share of a country's total genre weight, via `SUM(score) OVER ()` computed *before* the `LIMIT` so the slices plus the leftover "other" total 100. Backs the detail view's pie chart at `GET /api/countries/{code}`.
 - **`trending_genres.sql`** — genre score deltas between each country's two most recent load dates, using `LAG()` over a window. Wired up at `GET /api/genres/trending`. Needs at least two days of pipeline history to return anything — with a fresh database it legitimately returns `[]`, not a bug.
+- **`genre_artists.sql`** — the artists behind one genre in one country, ranked by streams. Backs the panel that opens when you click a genre. Uses a LEFT JOIN to `chart_entries` on purpose: the genre link comes from Last.fm and MusicBrainz tags, which cover artists who aren't currently charting — those are still valid examples of the genre there, so they sort last with null streams rather than disappearing.
 - **`hidden_gems.sql`** — artists a country streams heavily that barely chart anywhere else. Same IDF idea as the genre scoring, applied to artists: `streams_here × LN(total_countries / countries_charting_them)`. An artist charting everywhere scores `LN(1) = 0` and drops out **by construction**, so global superstars can't appear no matter how many streams they have — no blocklist involved. On real data this surfaces back number and Aimyon for Japan, sertanejo and funk carioca acts for Brazil, and the corridos tumbados scene for Mexico.
 - **`global_artists.sql`** — biggest artists worldwide by streams summed across every chart, with how many countries they chart in and the change since the previous run. Uses `DENSE_RANK` per country rather than a single global "latest date", because countries aren't guaranteed to load on the same day and a shared date would silently drop any that ran late.
 - **`similar_countries.sql`** — which country pairs share the most top genres, via a self-join. Not wired to an endpoint; kept as a documented ad hoc analytical query, which is a normal part of the job too, not everything needs a route.
@@ -350,6 +391,14 @@ The same endpoint also used to return all 100 artists per country — about 7,60
 **Connections come from a pool** (`psycopg2.pool.ThreadedConnectionPool`), not one per call. Measured: **2.30 ms to open a connection vs 0.10 ms to reuse one** — a 23× overhead on an endpoint whose queries take under a millisecond, and that was the best case over a unix socket with no TLS. A managed Postgres adds network round-trips and a handshake to every one. The detail endpoint issues 5 queries, so unpooled it paid that setup cost five times before running any SQL.
 
 ---
+
+## Country flags
+
+Flags are **images**, not emoji, and that isn't a style preference.
+
+An emoji flag is two Unicode "regional indicator" characters that a font is supposed to substitute with a single glyph. Apple's emoji font does; Microsoft's never has. So on Windows every flag in this app rendered as the bare letters — `US`, `JP`, `BR` — and no amount of JavaScript fixes it, because it's a missing font glyph rather than a string problem.
+
+`CountryFlag` renders an `<img>` from flagcdn, keyed by the same lowercase alpha-2 code the pipeline already uses, so there's no mapping table. It looks identical on Windows, macOS, iOS and Android. If an image fails to load the component renders nothing at all rather than a broken-image icon — the country name always sits beside it, so no information is lost.
 
 ## The map
 

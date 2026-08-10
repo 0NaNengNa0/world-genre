@@ -1,24 +1,26 @@
-"""Fill in artist origin country and formation year from MusicBrainz.
+"""Fill in artist origin country and formation year.
 
 Populates the `artists` dimension, which powers the domestic-vs-imported
 share on the country detail view.
 
-    artists (rows created by run_load from chart entries)
-        -> MusicBrainz artist lookup
-        -> artists.origin_country / formed_year / resolved_at
+**Three passes, cheapest first.** The naive version asked MusicBrainz about
+every artist individually, and MusicBrainz allows ~1 request/second: measured
+on this dataset that was 4,244 calls, roughly 106 minutes of pure waiting,
+spread over ten weekly runs before coverage was complete.
 
-**Bounded on purpose.** MusicBrainz allows ~1 request/second, and this
-project's charts contain ~2,300 unique artists across 20 countries - most
-without a known MBID, needing a name search first (2 calls each). Resolving
-every one in a single run measured out at roughly 6 hours at 76 countries,
-which is not a pipeline task, it's an outage. So each run resolves at most
-MAX_PER_RUN artists and stops. The dimension fills in over successive runs,
-and because the pipeline is weekly the whole catalogue is covered without any
-individual run taking more than a few minutes.
+    1. Wikidata by MusicBrainz id   - hundreds per query, exact match
+    2. Wikidata by artist name      - hundreds per query, unambiguous only
+    3. MusicBrainz, bounded         - whatever's left, at 1 req/sec
 
-Artists whose lookup genuinely finds nothing still get `resolved_at` set, so
-later runs spend their budget on unseen artists instead of retrying the same
-permanent misses forever.
+Wikidata answers the same question (P495/P27 for country, P571 for
+formation) but its SPARQL endpoint takes a VALUES block, so one request
+covers a whole batch instead of one artist. Passes 1 and 2 finish in
+seconds; pass 3 exists because Wikidata's coverage of smaller chart artists
+is patchy and MusicBrainz's name search is better at finding them.
+
+Artists resolved by any pass get `resolved_at` set, so later runs spend their
+MusicBrainz budget only on genuinely unknown names rather than rediscovering
+the same blanks.
 
 Run from the backend/ directory, after run_load:
     python -m scripts.run_load
@@ -33,13 +35,18 @@ import requests
 
 from app.core.config import DATA_DIR
 from app.core.db import get_connection
-from app.services.extractors import musicbrainz
+from app.services.extractors import musicbrainz, wikidata
 
 LASTFM_DIR = DATA_DIR / "raw" / "lastfm"
 
-# One run's budget. At ~1.5s pacing and up to 2 calls per artist this is a
-# few minutes - short enough to sit inside a DAG task without dominating it.
-MAX_PER_RUN = 250
+# Wikidata batches. Large enough that the whole catalogue is a handful of
+# requests, small enough to stay inside the endpoint's 60-second timeout.
+WIKIDATA_BATCH = 200
+PAUSE_BETWEEN_BATCHES = 1.0
+
+# MusicBrainz fallback budget per run. Only reached for artists both Wikidata
+# passes missed, which is a far smaller set than before.
+MAX_MUSICBRAINZ_PER_RUN = 250
 PACING_SLEEP = 1.5
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -47,11 +54,8 @@ logger = logging.getLogger("run_extract_artist_meta")
 
 
 def known_mbids() -> dict[str, str]:
-    """{artist_name: mbid} from Last.fm's output.
-
-    Last.fm hands back an mbid with each artist, which skips the name-search
-    call entirely - halving the request cost for any artist it covers.
-    """
+    """{artist_name: mbid} from Last.fm's output, which returns one per
+    artist - skipping a lookup entirely for anyone it covers."""
     mbids: dict[str, str] = {}
     for path in sorted(LASTFM_DIR.glob("*.json")):
         for artist in json.loads(path.read_text()).get("artists", []):
@@ -61,12 +65,12 @@ def known_mbids() -> dict[str, str]:
     return mbids
 
 
-def pending_artists(cur, limit: int) -> list[str]:
-    """Artists never looked up yet, most-charted first.
+def pending_artists(cur) -> list[str]:
+    """Unresolved artists, most-charted first.
 
     Ordering by chart presence means a truncated run resolves the artists
-    that actually carry streams, so the domestic-share metric becomes
-    meaningful early instead of after full coverage.
+    that actually carry streams, so domestic share becomes meaningful early
+    rather than only at full coverage.
     """
     cur.execute(
         """
@@ -76,16 +80,41 @@ def pending_artists(cur, limit: int) -> list[str]:
         WHERE a.resolved_at IS NULL
         GROUP BY a.artist_name
         ORDER BY COUNT(c.*) DESC, a.artist_name
-        LIMIT %s
-        """,
-        (limit,),
+        """
     )
     return [r[0] for r in cur.fetchall()]
 
 
-def resolve(name: str, mbid: str | None) -> tuple[str | None, dict]:
-    """(mbid, meta) for one artist. Sleeps between HTTP calls, not around
-    cache hits, so pacing tracks actual request volume."""
+def _save(rows: list[tuple]) -> None:
+    """One connection, one round trip, for the whole batch.
+
+    This used to open a connection and commit per artist - fine at 1.5s
+    between lookups, pointless overhead now that a pass resolves hundreds at
+    once.
+    """
+    if not rows:
+        return
+    with get_connection() as conn, conn.cursor() as cur:
+        cur.executemany(
+            """
+            UPDATE artists
+            SET mbid = COALESCE(%s, mbid),
+                origin_country = %s,
+                formed_year = %s,
+                resolved_at = %s
+            WHERE artist_name = %s
+            """,
+            rows,
+        )
+
+
+def _chunks(items: list, size: int):
+    for start in range(0, len(items), size):
+        yield items[start : start + size]
+
+
+def resolve_via_musicbrainz(name: str, mbid: str | None) -> tuple[str | None, dict]:
+    """(mbid, meta) for one artist. Sleeps between HTTP calls only."""
     if not mbid:
         try:
             mbid = musicbrainz.search_artist(name)
@@ -109,57 +138,88 @@ def main() -> None:
     lastfm_mbids = known_mbids()
     now = datetime.now(timezone.utc)
 
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            names = pending_artists(cur, MAX_PER_RUN)
-            cur.execute("SELECT COUNT(*) FROM artists WHERE resolved_at IS NULL")
-            total_pending = cur.fetchone()[0]
+    with get_connection() as conn, conn.cursor() as cur:
+        pending = pending_artists(cur)
 
-    if not names:
+    if not pending:
         logger.info("Every artist already resolved - nothing to do.")
         return
 
+    logger.info("%d artists unresolved", len(pending))
+    resolved: set[str] = set()
+
+    # --- Pass 1: Wikidata by MusicBrainz id (exact) ---
+    with_mbid = {n: lastfm_mbids[n] for n in pending if n in lastfm_mbids}
+    if with_mbid:
+        by_mbid = {mbid: name for name, mbid in with_mbid.items()}
+        rows = []
+        for batch in _chunks(list(by_mbid), WIKIDATA_BATCH):
+            try:
+                found = wikidata.fetch_meta_by_mbids(batch)
+            except requests.RequestException as e:
+                logger.warning("  wikidata mbid batch failed, skipping: %s", e)
+                continue
+            for mbid, meta in found.items():
+                name = by_mbid[mbid]
+                rows.append((mbid, meta["country"], meta["formed_year"], now, name))
+                resolved.add(name)
+            time.sleep(PAUSE_BETWEEN_BATCHES)
+        _save(rows)
+        logger.info(
+            "pass 1 (wikidata by mbid): %d/%d resolved in %d queries",
+            len(rows),
+            len(with_mbid),
+            -(-len(with_mbid) // WIKIDATA_BATCH),
+        )
+
+    # --- Pass 2: Wikidata by name (ambiguous labels rejected) ---
+    remaining = [n for n in pending if n not in resolved]
+    if remaining:
+        rows = []
+        for batch in _chunks(remaining, WIKIDATA_BATCH):
+            try:
+                found = wikidata.fetch_meta_by_names(batch)
+            except requests.RequestException as e:
+                logger.warning("  wikidata name batch failed, skipping: %s", e)
+                continue
+            for name, meta in found.items():
+                rows.append((None, meta["country"], meta["formed_year"], now, name))
+                resolved.add(name)
+            time.sleep(PAUSE_BETWEEN_BATCHES)
+        _save(rows)
+        logger.info(
+            "pass 2 (wikidata by name): %d/%d resolved in %d queries",
+            len(rows),
+            len(remaining),
+            -(-len(remaining) // WIKIDATA_BATCH),
+        )
+
+    # --- Pass 3: MusicBrainz, bounded ---
+    remaining = [n for n in pending if n not in resolved][:MAX_MUSICBRAINZ_PER_RUN]
+    if remaining:
+        logger.info(
+            "pass 3 (musicbrainz): attempting %d at ~1 req/sec (budget %d)",
+            len(remaining),
+            MAX_MUSICBRAINZ_PER_RUN,
+        )
+        rows = []
+        for i, name in enumerate(remaining, 1):
+            mbid, meta = resolve_via_musicbrainz(name, lastfm_mbids.get(name))
+            if mbid is None and not meta:
+                # Network failure rather than a genuine miss - leave
+                # resolved_at NULL so the next run retries instead of
+                # recording a false blank.
+                continue
+            rows.append((mbid, meta.get("country"), meta.get("formed_year"), now, name))
+            resolved.add(name)
+            if i % 50 == 0:
+                logger.info("  %d/%d attempted", i, len(remaining))
+        _save(rows)
+        logger.info("pass 3 (musicbrainz): %d resolved", len(rows))
+
+    still_pending = len(pending) - len(resolved)
     logger.info(
-        "%d artists unresolved; this run will attempt %d (budget %d)",
-        total_pending,
-        len(names),
-        MAX_PER_RUN,
-    )
-
-    resolved = failed = with_country = 0
-    for i, name in enumerate(names, 1):
-        mbid, meta = resolve(name, lastfm_mbids.get(name))
-        if mbid is None and not meta:
-            # A network failure, not a genuine miss - leave resolved_at NULL
-            # so the next run tries again rather than recording a false blank.
-            failed += 1
-            continue
-
-        with get_connection() as conn, conn.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE artists
-                SET mbid = COALESCE(%s, mbid),
-                    origin_country = %s,
-                    formed_year = %s,
-                    resolved_at = %s
-                WHERE artist_name = %s
-                """,
-                (mbid, meta.get("country"), meta.get("formed_year"), now, name),
-            )
-        resolved += 1
-        if meta.get("country"):
-            with_country += 1
-        if i % 50 == 0:
-            logger.info("  %d/%d attempted", i, len(names))
-
-    logger.info(
-        "Done. %d resolved (%d with a country), %d deferred to next run. "
-        "%d still unresolved overall.",
-        resolved,
-        with_country,
-        failed,
-        max(total_pending - resolved, 0),
+        "Done. %d resolved this run, %d still unresolved.", len(resolved), still_pending
     )
 
 
