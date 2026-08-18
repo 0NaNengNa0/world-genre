@@ -1,0 +1,14 @@
+# Only needed when DATA_DIR points at a gs:// bucket - i.e. in Cloud Run.
+# Kept out of requirements.txt so local development, `npm run offline` and CI
+# stay free of the Google client libraries, which pull in a large dependency
+# tree (google-auth, google-api-core, protobuf) for a feature none of them use.
+#
+# app/core/storage.py imports this lazily and raises a message naming this
+# file if a gs:// DATA_DIR is configured without it.
+#
+#     pip install -r requirements.txt -r requirements-cloud.txt
+#
+# The [gs] extra matters: plain `cloudpathlib` installs cleanly and then fails
+# at GSPath construction, which is a confusing place to discover it.
+cloudpathlib[gs]>=0.18.0
+google-cloud-bigquery>=3.25.0

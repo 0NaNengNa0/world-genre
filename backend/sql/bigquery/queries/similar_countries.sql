@@ -8,12 +8,12 @@
 -- expected to be able to answer ad hoc with SQL, not necessarily productionize.
 WITH latest_snapshot AS (
     SELECT country_code, MAX(snapshot_date) AS snapshot_date
-    FROM country_genre_scores
+    FROM `{dataset}.country_genre_scores`
     GROUP BY country_code
 ),
 latest_genres AS (
     SELECT cgs.country_code, cgs.genre
-    FROM country_genre_scores cgs
+    FROM `{dataset}.country_genre_scores` cgs
     JOIN latest_snapshot ls
       ON ls.country_code = cgs.country_code
      AND ls.snapshot_date = cgs.snapshot_date

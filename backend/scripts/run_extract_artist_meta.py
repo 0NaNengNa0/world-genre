@@ -33,8 +33,9 @@ from datetime import datetime, timezone
 
 import requests
 
+from app.core.bq import dataset_id, run_query
+from app.core.bq_load import merge_dimension
 from app.core.config import DATA_DIR
-from app.core.db import get_connection
 from app.services.extractors import musicbrainz, wikidata
 
 LASTFM_DIR = DATA_DIR / "raw" / "lastfm"
@@ -52,6 +53,10 @@ PACING_SLEEP = 1.5
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger("run_extract_artist_meta")
 
+# One timestamp for the whole run, ISO-formatted because rows reach
+# BigQuery through a JSON load rather than a typed driver.
+_NOW = datetime.now(timezone.utc).isoformat()
+
 
 def known_mbids() -> dict[str, str]:
     """{artist_name: mbid} from Last.fm's output, which returns one per
@@ -65,47 +70,65 @@ def known_mbids() -> dict[str, str]:
     return mbids
 
 
-def pending_artists(cur) -> list[str]:
+def pending_artists() -> list[str]:
     """Unresolved artists, most-charted first.
 
-    Ordering by chart presence means a truncated run resolves the artists
-    that actually carry streams, so domestic share becomes meaningful early
-    rather than only at full coverage.
+    Ordering by chart presence means a truncated run resolves the artists that
+    actually carry streams, so domestic share becomes meaningful early rather
+    than only at full coverage. That matters because MusicBrainz's rate limit
+    caps how many any single run can get through.
+
+    COUNT(c.artist_name) rather than Postgres's COUNT(c.*): BigQuery has no
+    row-wildcard count, and counting a column from the outer-joined side
+    correctly yields 0 for artists that never charted, which is the behaviour
+    the ordering depends on.
     """
-    cur.execute(
-        """
-        SELECT a.artist_name
-        FROM artists a
-        LEFT JOIN chart_entries c ON c.artist_name = a.artist_name
+    rows = run_query(
+        f"""
+        SELECT a.artist_name, COUNT(c.artist_name) AS chart_rows
+        FROM `{dataset_id()}.artists` a
+        LEFT JOIN `{dataset_id()}.chart_entries` c
+          ON c.artist_name = a.artist_name
         WHERE a.resolved_at IS NULL
         GROUP BY a.artist_name
-        ORDER BY COUNT(c.*) DESC, a.artist_name
+        ORDER BY chart_rows DESC, a.artist_name
         """
     )
-    return [r[0] for r in cur.fetchall()]
+    return [r["artist_name"] for r in rows]
 
 
-def _save(rows: list[tuple]) -> None:
-    """One connection, one round trip, for the whole batch.
+def _row(name: str, mbid: str | None, meta: dict) -> dict:
+    """One resolved artist as a warehouse row.
 
-    This used to open a connection and commit per artist - fine at 1.5s
-    between lookups, pointless overhead now that a pass resolves hundreds at
-    once.
+    resolved_at is set even when the source knew nothing about the artist,
+    which is what stops every later run retrying the same permanent misses -
+    "looked up and found nothing" is a different state from "not looked up".
+    """
+    return {
+        "artist_name": name,
+        "mbid": mbid,
+        "origin_country": meta.get("country"),
+        "formed_year": meta.get("formed_year"),
+        "resolved_at": _NOW,
+    }
+
+
+def _save(rows: list[dict]) -> None:
+    """Write one batch of resolved artists.
+
+    update_columns is explicit and deliberately excludes deezer_fans: that
+    column belongs to run_load, and a blanket update here would blank it on
+    every enrichment run. The dimension is written by several scripts that
+    each own different columns.
     """
     if not rows:
         return
-    with get_connection() as conn, conn.cursor() as cur:
-        cur.executemany(
-            """
-            UPDATE artists
-            SET mbid = COALESCE(%s, mbid),
-                origin_country = %s,
-                formed_year = %s,
-                resolved_at = %s
-            WHERE artist_name = %s
-            """,
-            rows,
-        )
+    merge_dimension(
+        "artists",
+        "artist_name",
+        rows,
+        update_columns=["mbid", "origin_country", "formed_year", "resolved_at"],
+    )
 
 
 def _chunks(items: list, size: int):
@@ -136,10 +159,8 @@ def resolve_via_musicbrainz(name: str, mbid: str | None) -> tuple[str | None, di
 
 def main() -> None:
     lastfm_mbids = known_mbids()
-    now = datetime.now(timezone.utc)
 
-    with get_connection() as conn, conn.cursor() as cur:
-        pending = pending_artists(cur)
+    pending = pending_artists()
 
     if not pending:
         logger.info("Every artist already resolved - nothing to do.")
@@ -161,7 +182,7 @@ def main() -> None:
                 continue
             for mbid, meta in found.items():
                 name = by_mbid[mbid]
-                rows.append((mbid, meta["country"], meta["formed_year"], now, name))
+                rows.append(_row(name, mbid, meta))
                 resolved.add(name)
             time.sleep(PAUSE_BETWEEN_BATCHES)
         _save(rows)
@@ -183,7 +204,7 @@ def main() -> None:
                 logger.warning("  wikidata name batch failed, skipping: %s", e)
                 continue
             for name, meta in found.items():
-                rows.append((None, meta["country"], meta["formed_year"], now, name))
+                rows.append(_row(name, None, meta))
                 resolved.add(name)
             time.sleep(PAUSE_BETWEEN_BATCHES)
         _save(rows)
@@ -210,7 +231,7 @@ def main() -> None:
                 # resolved_at NULL so the next run retries instead of
                 # recording a false blank.
                 continue
-            rows.append((mbid, meta.get("country"), meta.get("formed_year"), now, name))
+            rows.append(_row(name, mbid, meta))
             resolved.add(name)
             if i % 50 == 0:
                 logger.info("  %d/%d attempted", i, len(remaining))

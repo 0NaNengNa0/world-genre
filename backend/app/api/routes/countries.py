@@ -1,76 +1,57 @@
-from fastapi import APIRouter, HTTPException, Query
+"""Country and artist endpoints, served from published JSON.
+
+Every response here was assembled by scripts/run_publish.py at pipeline time.
+The routes do lookups, not queries - see app/services/published.py for why the
+warehouse is deliberately not in the request path.
+"""
+from fastapi import APIRouter, HTTPException
 
 from app.schemas.countries import (
     CountriesResponse,
     CountryDetail,
-    CountrySummary,
     GenreDetail,
-    GlobalArtist,
     GlobalArtistsResponse,
 )
-from app.services.countries import (
-    get_country_detail,
-    get_country_summaries,
-    get_genre_detail,
-    get_global_artists,
-)
+from app.services import published
 
 router = APIRouter(tags=["countries"])
+
+# Distinguishes "nothing published yet" from "no such country". The first is a
+# deployment state that resolves itself on the next pipeline run, the second
+# is a client error - returning 404 for both would send someone hunting for a
+# missing country when the real answer is that run_publish hasn't run.
+_NOT_PUBLISHED = "No published data yet. Run the pipeline's publish step."
 
 
 @router.get("/countries", response_model=CountriesResponse)
 def list_countries() -> CountriesResponse:
-    summaries = [CountrySummary(**s) for s in get_country_summaries()]
+    summaries = published.get_country_summaries()
+    if summaries is None:
+        raise HTTPException(status_code=503, detail=_NOT_PUBLISHED)
     return CountriesResponse(countries=summaries)
 
 
 @router.get("/artists/global", response_model=GlobalArtistsResponse)
-def global_artists(limit: int = Query(40, ge=1, le=200)) -> GlobalArtistsResponse:
-    """Biggest artists worldwide, by streams summed across every chart.
-
-    Declared BEFORE /countries/{code} is irrelevant here (different prefix),
-    but note it is deliberately not under /countries - it isn't scoped to one.
-    """
-    return GlobalArtistsResponse(
-        artists=[GlobalArtist(**a) for a in get_global_artists(limit)]
-    )
+def global_artists() -> GlobalArtistsResponse:
+    artists = published.get_global_artists()
+    if artists is None:
+        raise HTTPException(status_code=503, detail=_NOT_PUBLISHED)
+    return GlobalArtistsResponse(artists=artists)
 
 
 @router.get("/countries/{code}", response_model=CountryDetail)
-def get_country(
-    code: str,
-    artist_limit: int = Query(100, ge=1, le=500),
-    genre_limit: int = Query(10, ge=1, le=100),
-    track_limit: int = Query(20, ge=1, le=200),
-    gem_limit: int = Query(10, ge=1, le=100),
-) -> CountryDetail:
-    """One country in depth - the click-through from a grid card."""
-    detail = get_country_detail(
-        code.lower(), artist_limit, genre_limit, track_limit, gem_limit
-    )
+def country_detail(code: str) -> CountryDetail:
+    detail = published.get_country_detail(code.lower())
     if detail is None:
-        # A code that isn't in the warehouse at all. Note this is also what
-        # you get for a country that exists in seeds/countries.csv but whose
-        # pipeline run produced nothing - the API can't distinguish "no such
-        # country" from "never loaded", and both are genuinely absent here.
-        raise HTTPException(status_code=404, detail=f"Unknown country code: {code}")
+        raise HTTPException(status_code=404, detail=f"Unknown country: {code}")
     return CountryDetail(**detail)
 
 
 @router.get("/countries/{code}/genres/{genre}", response_model=GenreDetail)
-def country_genre(
-    code: str,
-    genre: str,
-    limit: int = Query(12, ge=1, le=100),
-) -> GenreDetail:
-    """One genre within one country - its description and example artists.
-
-    Declared after /countries/{code} so the more specific path still matches;
-    FastAPI routes in declaration order, and a bare {code} would otherwise
-    swallow nothing here (different segment count) but keeping them adjacent
-    makes the relationship obvious.
-    """
-    detail = get_genre_detail(code.lower(), genre.lower(), limit)
+def genre_detail(code: str, genre: str) -> GenreDetail:
+    detail = published.get_genre_detail(code.lower(), genre)
     if detail is None:
-        raise HTTPException(status_code=404, detail=f"Unknown country code: {code}")
-    return detail
+        raise HTTPException(
+            status_code=404, detail=f"No data for {genre} in {code}"
+        )
+    return GenreDetail(**detail)

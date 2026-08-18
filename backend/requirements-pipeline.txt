@@ -6,7 +6,6 @@
 #
 # For local development you usually want requirements.txt instead, which
 # pulls this in plus the API deps.
-psycopg2-binary>=2.9.9
 requests>=2.31.0
 beautifulsoup4>=4.12.0
 # Never imported directly - bs4 loads it by name from BeautifulSoup(..., "lxml").

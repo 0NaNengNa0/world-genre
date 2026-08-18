@@ -25,14 +25,18 @@ def images_module(tmp_path, monkeypatch):
     The module caches on file mtimes, so it's reloaded per test to start from
     a clean cache rather than one primed by a previous test's paths.
     """
-    import app.services.countries as countries
+    import app.services.images as countries
 
     countries = importlib.reload(countries)
     deezer_path = tmp_path / "deezer.json"
     wikidata_path = tmp_path / "wikidata.json"
     monkeypatch.setattr(countries, "DEEZER_ARTISTS_PATH", deezer_path)
     monkeypatch.setattr(countries, "WIKIDATA_ARTISTS_PATH", wikidata_path)
-    monkeypatch.setattr(countries, "_image_cache", None)
+    monkeypatch.setattr(countries, "_cache", None)
+    # The mapping is TTL-cached so a bucket isn't stat-ed on every request.
+    # Disable that here: these tests are about freshness, and a 60s window
+    # would make every one of them pass trivially by never re-reading.
+    monkeypatch.setattr(countries, "CACHE_TTL_SECONDS", 0.0)
     return countries, deezer_path, wikidata_path
 
 
@@ -43,13 +47,13 @@ def _write(path, payload):
 class TestArtistImageResolution:
     def test_no_files_at_all(self, images_module):
         countries, _, _ = images_module
-        assert countries._artist_images() == {}
+        assert countries.artist_images() == {}
 
     def test_deezer_wins_when_it_has_a_real_photo(self, images_module):
         countries, deezer_path, wikidata_path = images_module
         _write(deezer_path, {"Drake": {"picture_medium": REAL_DEEZER}})
         _write(wikidata_path, {"Drake": {"mbid": "x", "image": COMMONS}})
-        assert countries._artist_images()["Drake"] == REAL_DEEZER
+        assert countries.artist_images()["Drake"] == REAL_DEEZER
 
     def test_wikidata_fills_a_deezer_placeholder(self, images_module):
         # The Radiohead case: Deezer "has" a URL, but it's the empty-hash
@@ -57,25 +61,25 @@ class TestArtistImageResolution:
         countries, deezer_path, wikidata_path = images_module
         _write(deezer_path, {"Radiohead": {"picture_medium": PLACEHOLDER}})
         _write(wikidata_path, {"Radiohead": {"mbid": "x", "image": COMMONS}})
-        assert countries._artist_images()["Radiohead"] == COMMONS
+        assert countries.artist_images()["Radiohead"] == COMMONS
 
     def test_wikidata_fills_an_artist_deezer_never_returned(self, images_module):
         countries, deezer_path, wikidata_path = images_module
         _write(deezer_path, {})
         _write(wikidata_path, {"Tool": {"mbid": "x", "image": COMMONS}})
-        assert countries._artist_images()["Tool"] == COMMONS
+        assert countries.artist_images()["Tool"] == COMMONS
 
     def test_artist_missing_from_both_has_no_entry(self, images_module):
         countries, deezer_path, wikidata_path = images_module
         _write(deezer_path, {"Ghost": {"picture_medium": PLACEHOLDER}})
         _write(wikidata_path, {})
-        assert "Ghost" not in countries._artist_images()
+        assert "Ghost" not in countries.artist_images()
 
     def test_malformed_wikidata_rows_are_skipped(self, images_module):
         countries, deezer_path, wikidata_path = images_module
         _write(deezer_path, {})
         _write(wikidata_path, {"A": None, "B": {"mbid": "x"}, "C": {"image": COMMONS}})
-        assert countries._artist_images() == {"C": COMMONS}
+        assert countries.artist_images() == {"C": COMMONS}
 
     def test_cache_refreshes_when_a_file_changes(self, images_module):
         # The pipeline rewrites these files on every run; a cache that never
@@ -83,14 +87,14 @@ class TestArtistImageResolution:
         countries, deezer_path, wikidata_path = images_module
         _write(deezer_path, {"Drake": {"picture_medium": REAL_DEEZER}})
         _write(wikidata_path, {})
-        assert "Drake" in countries._artist_images()
+        assert "Drake" in countries.artist_images()
 
         import os
         _write(deezer_path, {"Drake": {"picture_medium": PLACEHOLDER}})
         stat = deezer_path.stat()
         os.utime(deezer_path, (stat.st_atime + 10, stat.st_mtime + 10))
 
-        assert "Drake" not in countries._artist_images()
+        assert "Drake" not in countries.artist_images()
 
 
 class TestArtistsNeedingImages:

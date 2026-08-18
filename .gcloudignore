@@ -1,0 +1,51 @@
+# What NOT to upload to Cloud Build.
+#
+# This file's existence matters as much as its contents. Without it, gcloud
+# falls back to .gitignore - which excludes `dist/`, the one directory the
+# image actually needs. The build would then succeed, push an image with no
+# frontend in it, and serve 404s at the root with nothing in the logs to
+# explain why.
+#
+# Size is the other reason. The build context moved to the repo root so the
+# Dockerfile could reach frontend/dist, which pulled in .venv (231 MB),
+# node_modules (9 MB) and the data cache (23 MB) - 3,882 files and 44 MiB,
+# enough that archiving it crashed on Windows with a file-locking error.
+
+# Dependencies - reinstalled inside the image, never shipped
+node_modules/
+.venv/
+__pycache__/
+*.py[cod]
+
+# Pipeline data belongs in the bucket DATA_DIR points at. Baking a snapshot
+# into the image would serve stale results no pipeline run could refresh.
+backend/data/
+
+# Airflow runtime output
+backend/logs/
+backend/plugins/
+backend/config/
+backend/airflow.db
+
+# Local tooling
+.git/
+.github/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+backend/tests/
+
+# Secrets - must never reach a build layer
+.env
+.env.*
+!.env.example
+
+# Editor and OS noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Docs are not needed to build or run
+*.md

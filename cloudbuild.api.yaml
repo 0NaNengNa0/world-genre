@@ -1,0 +1,31 @@
+# Builds the API image, which also serves the built frontend.
+#
+# Context is the repo ROOT, not backend/, because the image needs both
+# backend/app and frontend/dist. Docker cannot COPY from outside its build
+# context, so a backend-only context makes the frontend unreachable.
+#
+# This config exists because `gcloud builds submit --tag` can only build a
+# file named exactly `Dockerfile`, and this repo has two.
+#
+# Run from the repo root:
+#
+#   npm --prefix frontend run build
+#   gcloud builds submit --config cloudbuild.api.yaml `
+#     --substitutions=_IMAGE=asia-southeast3-docker.pkg.dev/world-genre-natt/world-genre/api
+#
+# The frontend must be built first: this copies frontend/dist rather than
+# building it, so that the image stays a single Python layer and Cloud Build
+# doesn't need a Node toolchain.
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --file=backend/Dockerfile.api
+      - --tag=${_IMAGE}
+      - .
+
+# Listing the image is what makes Cloud Build push it. Without this block it
+# is built and then discarded, which looks like a passing build followed by an
+# inexplicable "image not found" at deploy time.
+images:
+  - ${_IMAGE}

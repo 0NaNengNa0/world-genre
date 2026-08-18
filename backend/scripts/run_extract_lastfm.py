@@ -48,8 +48,16 @@ def fetch_tags_safe(api_key: str, artist: str) -> tuple[str, list[dict]]:
 
 
 def main() -> None:
+    # No-op when there's no .env, which is the normal case in a container -
+    # there the value arrives from Secret Manager as a real env var.
     load_dotenv()
-    api_key = os.environ["LASTFM_API_KEY"]
+    api_key = os.environ.get("LASTFM_API_KEY")
+    if not api_key:
+        raise SystemExit(
+            "LASTFM_API_KEY is not set. Locally, put it in backend/.env; in "
+            "Cloud Run, mount it from Secret Manager as an environment "
+            "variable on the job."
+        )
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     artists_by_country: dict[str, list[dict]] = {}

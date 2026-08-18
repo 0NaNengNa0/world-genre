@@ -139,6 +139,24 @@ class GenreDetail(BaseModel):
     artists: list[GenreArtist] = []
 
 
+class ArtistPopularity(BaseModel):
+    """One artist measured by every source available.
+
+    The three counts are NOT interchangeable and must not be summed: Spotify
+    streams on this country's chart, Last.fm listeners in this country, and
+    Deezer follows worldwide. They count different populations, so where they
+    disagree is the informative part.
+    """
+
+    artist: str
+    # Spotify plays on this country's chart today.
+    streams: int | None = None
+    # Last.fm users in this country. Present for artists that aren't charting.
+    lastfm_listeners: int | None = None
+    # Deezer follows, global rather than country-scoped.
+    deezer_fans: int | None = None
+
+
 class CountryDetail(BaseModel):
     """One country in depth - the click-through from a grid card."""
 
@@ -164,4 +182,6 @@ class CountryDetail(BaseModel):
     # Artists big here and nowhere else. Empty when every artist this country
     # charts also charts everywhere - a real finding, not a gap.
     hidden_gems: list[HiddenGem] = []
+    # Same artists, three independent measures side by side.
+    artist_popularity: list[ArtistPopularity] = []
     cover_image: str | None = None

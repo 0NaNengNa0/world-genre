@@ -1,0 +1,18 @@
+[
+  {
+    "name": "keep-recent-tagged",
+    "action": { "type": "Keep" },
+    "mostRecentVersions": {
+      "packageNamePrefixes": ["api"],
+      "keepCount": 3
+    }
+  },
+  {
+    "name": "delete-old-untagged",
+    "action": { "type": "Delete" },
+    "condition": {
+      "tagState": "untagged",
+      "olderThan": "7d"
+    }
+  }
+]

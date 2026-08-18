@@ -17,7 +17,7 @@ WITH latest_two_dates AS (
         DENSE_RANK() OVER (
             PARTITION BY country_code ORDER BY snapshot_date DESC
         ) AS recency
-    FROM country_genre_scores
+    FROM `{dataset}.country_genre_scores`
 ),
 scored_with_previous AS (
     SELECT
@@ -28,7 +28,7 @@ scored_with_previous AS (
         LAG(cgs.score) OVER (
             PARTITION BY cgs.country_code, cgs.genre ORDER BY cgs.snapshot_date
         ) AS previous_score
-    FROM country_genre_scores cgs
+    FROM `{dataset}.country_genre_scores` cgs
     JOIN latest_two_dates ltd
       ON ltd.country_code = cgs.country_code
      AND ltd.snapshot_date = cgs.snapshot_date

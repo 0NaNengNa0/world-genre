@@ -1,0 +1,50 @@
+# The API image. Also serves the built frontend, so one Cloud Run service is
+# the whole deployment.
+#
+# Separate from backend/Dockerfile, which builds the Airflow pipeline image.
+# They cannot be one image: Airflow 3 ships its own pinned FastAPI and
+# pydantic, and installing the API's versions alongside them breaks Airflow's
+# api-server. Two images also keeps this one small, which is what Cloud Run
+# cold starts are billed on.
+#
+# Build context is the REPO ROOT (see cloudbuild.api.yaml), not backend/,
+# because this needs frontend/dist as well as backend/app.
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+WORKDIR /app
+
+# Dependencies first, as their own layer: they change far less often than
+# application code, so edits to app/ reuse the cached pip install.
+#
+# requirements-cloud.txt is required, not optional, for a deployed API: it
+# reads its payloads from a gs:// bucket, and cloudpathlib is what makes a
+# GSPath resolvable. Without it the container starts, passes its health probe
+# by binding the port, and then fails every request.
+COPY backend/requirements.txt backend/requirements-pipeline.txt backend/requirements-cloud.txt ./
+RUN pip install --no-cache-dir -r requirements.txt -r requirements-cloud.txt
+
+# Only what the API reads at runtime. backend/data is deliberately absent - it
+# belongs in the bucket DATA_DIR points at, and baking a snapshot into the
+# image would serve stale results no pipeline run could refresh.
+COPY backend/app ./app
+COPY backend/sql ./sql
+COPY backend/seeds ./seeds
+
+# The built SPA. Copied rather than built here, so the image needs no Node
+# toolchain and stays a single Python layer. app/main.py serves it only if
+# index.html is present, which is what keeps local development (where Vite
+# serves the frontend instead) working unchanged.
+COPY frontend/dist ./static
+
+# Cloud Run assigns the port and passes it in; it is not guaranteed to be
+# 8080. Binding a hardcoded port is the usual cause of a container that
+# deploys, passes its build, and then fails health checks.
+ENV PORT=8080
+EXPOSE 8080
+
+# Shell form so $PORT is expanded at runtime. Exec form would pass the string
+# "$PORT" to uvicorn verbatim.
+CMD exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT}

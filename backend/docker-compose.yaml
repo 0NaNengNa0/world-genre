@@ -82,7 +82,6 @@ x-airflow-common:
     # Overrides the .env value (which points at localhost:5433, correct for
     # the API running natively on the host) - inside these containers the
     # warehouse is reachable by service name on the default internal port.
-    DATABASE_URL: 'postgresql://world_genre:world_genre@app-postgres:5432/world_genre'
   volumes:
     - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
     - ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs
@@ -102,8 +101,6 @@ x-airflow-common:
     redis:
       condition: service_healthy
     postgres:
-      condition: service_healthy
-    app-postgres:
       condition: service_healthy
 
 services:
@@ -132,23 +129,6 @@ services:
   # Exposed on host port 5433 (not 5432) so it doesn't collide with a local
   # Postgres install, and so uvicorn - which runs natively via `npm run
   # start`/`dev`, not in a container - can reach it at localhost:5433.
-  app-postgres:
-    image: postgres:16
-    environment:
-      POSTGRES_USER: world_genre
-      POSTGRES_PASSWORD: world_genre
-      POSTGRES_DB: world_genre
-    ports:
-      - "5433:5432"
-    volumes:
-      - app-postgres-db-volume:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD", "pg_isready", "-U", "world_genre"]
-      interval: 10s
-      retries: 5
-      start_period: 5s
-    restart: always
-
   redis:
     # Redis is limited to 7.2-bookworm due to licencing change
     # https://redis.io/blog/redis-adopts-dual-source-available-licensing/
@@ -379,4 +359,3 @@ services:
 
 volumes:
   postgres-db-volume:
-  app-postgres-db-volume:

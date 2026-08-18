@@ -7,11 +7,11 @@
     "prestart": "npx kill-port 5173 8000 || echo ports were already free",
     "start": "concurrently -n airflow,trigger,backend,frontend -c magenta,yellow,green,cyan \"cd backend && docker compose up\" \"node scripts/trigger-genre-pipeline.js\" \".venv\\Scripts\\python.exe -m uvicorn app.main:app --port 8000 --app-dir backend\" \"npm --prefix frontend run dev\"",
     "preoffline": "npx kill-port 5173 8000 || echo ports were already free",
-    "offline": "node scripts/prepare-offline.js && concurrently -n backend,frontend -c green,cyan \".venv\\Scripts\\python.exe -m uvicorn app.main:app --port 8000 --app-dir backend\" \"npm --prefix frontend run dev\"",
-    "db:refresh": "node scripts/prepare-offline.js",
+    "offline": "concurrently -n backend,frontend -c green,cyan \".venv\\\\Scripts\\\\python.exe -m uvicorn app.main:app --port 8000 --app-dir backend\" \"npm --prefix frontend run dev\"",
     "stop": "npm run airflow:down && npx kill-port 5173 8000",
     "airflow:up": "cd backend && docker compose up -d --wait",
-    "airflow:down": "cd backend && docker compose down"
+    "airflow:down": "cd backend && docker compose down",
+    "publish": "cd backend && ..\\.venv\\Scripts\\python.exe -m scripts.run_publish"
   },
   "devDependencies": {
     "concurrently": "^9.1.0",

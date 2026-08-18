@@ -205,6 +205,44 @@ export function CountryDetailModal({ code, fallbackName, onClose }: Props) {
                 </>
               )}
 
+              {detail.artist_popularity.length > 0 && (
+                <>
+                  <h3 className="detail__subtitle">
+                    Popularity by source{' '}
+                    <span className="detail__count">these disagree</span>
+                  </h3>
+                  <ul className="sources">
+                    <li className="sources__head">
+                      <span>Artist</span>
+                      <span>Spotify</span>
+                      <span>Last.fm</span>
+                      <span>Deezer</span>
+                    </li>
+                    {detail.artist_popularity.slice(0, 8).map((a) => (
+                      <li key={a.artist} className="sources__row">
+                        <span className="gems__name">{a.artist}</span>
+                        <span className="sources__num">
+                          {a.streams?.toLocaleString() ?? '—'}
+                        </span>
+                        <span className="sources__num">
+                          {a.lastfm_listeners?.toLocaleString() ?? '—'}
+                        </span>
+                        <span className="sources__num">
+                          {a.deezer_fans?.toLocaleString() ?? '—'}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                  <p className="detail__caption">
+                    Three different populations — Spotify plays on this country's chart,
+                    Last.fm listeners here, Deezer follows worldwide — so they are never
+                    added together. Where they disagree is the interesting part. A
+                    charting artist with a tiny Deezer count usually means Deezer matched
+                    the wrong artist of that name.
+                  </p>
+                </>
+              )}
+
               {detail.top_tracks.length > 0 && (
                 <>
                   <h3 className="detail__subtitle">

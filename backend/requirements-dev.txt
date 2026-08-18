@@ -2,10 +2,6 @@
 # needed at runtime - just for running the test suite and linter.
 pytest>=8.0.0
 ruff>=0.6.0
-# Bundles a real, self-contained Postgres binary (no system install, no
-# Docker, no separate CI services: block needed) so the DB-layer tests in
-# tests/test_db_integration.py run against real Postgres instead of mocks.
-pgserver>=0.1.4
 # ISO 3166-1 country names for scripts/generate_countries_seed.py. Dev-only
 # because it regenerates a committed seed file - nothing at runtime imports it.
 pycountry>=24.6.1
@@ -13,3 +9,7 @@ pycountry>=24.6.1
 # import time if it's missing), used to exercise the API through the real ASGI
 # stack in tests/test_error_handling.py.
 httpx2>=0.28.0
+# Parses the BigQuery SQL offline so dialect errors fail in CI rather than
+# in a Cloud Run job. There is no local BigQuery emulator, so this is the
+# only way to check the .sql files without credentials and a network.
+sqlglot>=25.0.0

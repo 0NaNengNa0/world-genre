@@ -1,3 +1,24 @@
+/**
+ * Where the API lives.
+ *
+ * Empty by default, which keeps every request a same-origin relative path -
+ * exactly what the Vite dev proxy expects, so local development needs no
+ * configuration at all.
+ *
+ * It has to be configurable because the deployed frontend is static hosting
+ * with no proxy behind it: a relative `/api/countries` there resolves against
+ * the hosting domain and 404s. Set VITE_API_BASE_URL at build time to the
+ * API's own origin.
+ *
+ * Read via `import.meta.env`, so the value is baked in when the bundle is
+ * built rather than read at runtime - there is no server to read env from.
+ */
+const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '')
+
+function apiUrl(path: string): string {
+  return `${API_BASE}${path}`
+}
+
 export type DomesticShare = {
   /** Share of attributable streams going to artists from this country. */
   domestic_percentage: number
@@ -48,6 +69,16 @@ export type GenreBreakdown = {
   other_genre_count: number
 }
 
+export type ArtistPopularity = {
+  artist: string
+  /** Spotify plays on this country's chart. */
+  streams: number | null
+  /** Last.fm users in this country — a different population entirely. */
+  lastfm_listeners: number | null
+  /** Deezer follows, global rather than country-scoped. */
+  deezer_fans: number | null
+}
+
 export type CountryDetail = {
   code: string
   name: string
@@ -61,6 +92,7 @@ export type CountryDetail = {
   /** Actual charting songs with measured streams, from the fact table. */
   top_tracks: ChartTrack[]
   hidden_gems: HiddenGem[]
+  artist_popularity: ArtistPopularity[]
   cover_image: string | null
 }
 
@@ -108,7 +140,7 @@ export async function fetchGenreDetail(
   genre: string,
 ): Promise<GenreDetail> {
   const response = await fetch(
-    `/api/countries/${code}/genres/${encodeURIComponent(genre)}`,
+    apiUrl(`/api/countries/${code}/genres/${encodeURIComponent(genre)}`),
   )
   if (!response.ok) {
     throw new Error(`Failed to fetch ${genre} (${response.status})`)
@@ -117,7 +149,7 @@ export async function fetchGenreDetail(
 }
 
 export async function fetchGlobalArtists(): Promise<GlobalArtist[]> {
-  const response = await fetch('/api/artists/global')
+  const response = await fetch(apiUrl('/api/artists/global'))
   if (!response.ok) {
     throw new Error(`Failed to fetch global artists (${response.status})`)
   }
@@ -134,7 +166,7 @@ export type TrendingGenre = {
 }
 
 export async function fetchTrendingGenres(): Promise<TrendingGenre[]> {
-  const response = await fetch('/api/genres/trending')
+  const response = await fetch(apiUrl('/api/genres/trending'))
   if (!response.ok) {
     throw new Error(`Failed to fetch trending genres (${response.status})`)
   }
@@ -147,7 +179,7 @@ type CountriesResponse = {
 }
 
 export async function fetchCountries(): Promise<CountrySummary[]> {
-  const response = await fetch('/api/countries')
+  const response = await fetch(apiUrl('/api/countries'))
   if (!response.ok) {
     throw new Error(`Failed to fetch countries (${response.status})`)
   }
@@ -156,7 +188,7 @@ export async function fetchCountries(): Promise<CountrySummary[]> {
 }
 
 export async function fetchCountryDetail(code: string): Promise<CountryDetail> {
-  const response = await fetch(`/api/countries/${code}`)
+  const response = await fetch(apiUrl(`/api/countries/${code}`))
   if (!response.ok) {
     throw new Error(`Failed to fetch ${code} (${response.status})`)
   }

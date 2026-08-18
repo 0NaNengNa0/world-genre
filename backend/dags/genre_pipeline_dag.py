@@ -17,7 +17,7 @@ Dependency order:
   wikidata     -> fills in artist photos deezer had none for, looked up by
                   MusicBrainz id on Wikidata/Commons (depends on deezer,
                   since it only asks about deezer's misses)
-  ensure_schema-> applies sql/schema.sql (idempotent) so a fresh clone or
+  ensure_schema-> applies sql/bigquery/schema.sql (idempotent) so a fresh clone or
                   wiped volume doesn't fail load with UndefinedTable
   load         -> upserts data/processed/*.json into Postgres (the
                   warehouse the API reads from) - see scripts/run_load.py.
@@ -91,13 +91,27 @@ def genre_pipeline():
         runs after the first - it exists so a fresh clone (or a wiped
         `docker compose down -v` volume) doesn't fail the load task with
         UndefinedTable just because nobody remembered to run
-        scripts/run_init_db.py by hand."""
-        from scripts.run_init_db import main
+        scripts/run_init_bq.py by hand."""
+        from scripts.run_init_bq import main
         main()
 
     @task
     def load():
         from scripts.run_load import main
+        main()
+
+    @task
+    def publish():
+        """Runs every read query once and writes the API payloads as JSON.
+
+        The last stage, and the one that decouples serving from the
+        warehouse: BigQuery answers in 0.5-2s regardless of table size, so
+        the API reads published files instead of querying. Depends on the
+        enrichment tasks as well as load, because origin_country and genre
+        descriptions have to be in place before the payloads are built - a
+        publish that ran first would bake in nulls until tomorrow.
+        """
+        from scripts.run_publish import main
         main()
 
     @task
@@ -133,6 +147,7 @@ def genre_pipeline():
     loaded = load()
     enriched = enrich_artists()
     genre_info = enrich_genres()
+    published = publish()
 
     [kworb, lastfm] >> musicbrainz
     [kworb, lastfm] >> deezer
@@ -142,6 +157,9 @@ def genre_pipeline():
     deezer >> wikidata
     [kworb, lastfm, musicbrainz] >> cleansed
     [cleansed, schema] >> loaded >> [enriched, genre_info]
+    # Publish last: it reads what load and both enrichment tasks wrote,
+    # so running it earlier would bake nulls into the payloads.
+    [enriched, genre_info] >> published
 
 
 genre_pipeline()

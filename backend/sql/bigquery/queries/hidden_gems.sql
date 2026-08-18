@@ -1,6 +1,6 @@
 -- Artists who chart strongly in ONE country but barely anywhere else.
 --
--- Parameters: %(code)s, %(limit)s
+-- Parameters: @code, @limit
 --
 -- Same idea as the genre distinctiveness scoring, applied to artists instead:
 -- weight what a country actually streams by how rare that artist is across
@@ -22,7 +22,7 @@
 -- malformed parameter. Spell the word out anywhere in this file.
 WITH latest AS (
     SELECT country_code, MAX(snapshot_date) AS snapshot_date
-    FROM chart_entries
+    FROM `{dataset}.chart_entries`
     GROUP BY country_code
 ),
 current_streams AS (
@@ -31,7 +31,7 @@ current_streams AS (
         c.artist_name,
         SUM(COALESCE(c.daily_streams, c.weekly_streams, c.total_streams, 0)) AS streams,
         MIN(c.position) AS best_position
-    FROM chart_entries c
+    FROM `{dataset}.chart_entries` c
     JOIN latest l
       ON l.country_code = c.country_code
      AND l.snapshot_date = c.snapshot_date
@@ -51,15 +51,24 @@ SELECT
     cs.best_position,
     r.country_count,
     s.total_countries,
-    ROUND(
-        (cs.streams * LN(s.total_countries::numeric / r.country_count))::numeric, 1
-    ) AS gem_score
+    -- Both Postgres casts are dropped, and only one of them was cosmetic.
+    --
+    -- The inner `to numeric` cast was load-bearing: in Postgres, dividing two
+    -- integers truncates, so total_countries / country_count would have gone
+    -- to 1 for every artist charting in more than half the countries, and to
+    -- 0 above that - making LN(1) = 0 and silently zeroing their score.
+    -- BigQuery's `/` always returns FLOAT64 regardless of operand types, so
+    -- the division is already exact and the cast has nothing left to fix.
+    --
+    -- The outer cast existed only because Postgres has no
+    -- round(double precision, integer). BigQuery's ROUND takes FLOAT64.
+    ROUND(cs.streams * LN(s.total_countries / r.country_count), 1) AS gem_score
 FROM current_streams cs
 JOIN reach r ON r.artist_name = cs.artist_name
 CROSS JOIN scope s
-WHERE cs.country_code = %(code)s
+WHERE cs.country_code = @code
   -- Excludes artists charting in every country: their score is zero by
   -- definition, and returning them as "hidden" would be nonsense.
   AND r.country_count < s.total_countries
 ORDER BY gem_score DESC
-LIMIT %(limit)s;
+LIMIT @limit;

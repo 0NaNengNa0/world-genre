@@ -1,7 +1,7 @@
 -- Biggest artists worldwide by charted streaming, with how far they've
 -- travelled and how they moved since the previous run.
 --
--- Parameters: %(limit)s
+-- Parameters: @limit
 --
 -- "Global" here means summed across every country's chart, so an artist
 -- charting modestly in forty countries can outrank one dominating a single
@@ -18,6 +18,16 @@
 -- Careful: psycopg2 scans this whole file for placeholders without stripping
 -- SQL comments, so a bare percent sign - even in a comment - is read as a
 -- malformed parameter. Spell the word out anywhere in this file.
+-- BigQuery has no aggregate FILTER clause, which Postgres supports. The
+-- equivalents used below are COUNTIF(cond) and SUM(CASE WHEN cond THEN x END).
+--
+-- Not a like-for-like rewrite in one respect: SUM over an all-NULL set returns
+-- NULL, exactly as `SUM(...) FILTER` did when nothing matched, so the COALESCE
+-- wrappers stay load-bearing rather than decorative.
+--
+-- COUNT(DISTINCT x) FILTER has no COUNTIF form - COUNTIF counts rows, not
+-- distinct values - so that one becomes COUNT(DISTINCT CASE WHEN ... END),
+-- which skips NULLs and therefore counts only the matching values.
 WITH ranked_dates AS (
     SELECT DISTINCT
         country_code,
@@ -25,7 +35,7 @@ WITH ranked_dates AS (
         DENSE_RANK() OVER (
             PARTITION BY country_code ORDER BY snapshot_date DESC
         ) AS recency
-    FROM chart_entries
+    FROM `{dataset}.chart_entries`
 ),
 per_country AS (
     SELECT
@@ -33,7 +43,7 @@ per_country AS (
         c.country_code,
         rd.recency,
         SUM(COALESCE(c.daily_streams, c.weekly_streams, c.total_streams, 0)) AS streams
-    FROM chart_entries c
+    FROM `{dataset}.chart_entries` c
     JOIN ranked_dates rd
       ON rd.country_code = c.country_code
      AND rd.snapshot_date = c.snapshot_date
@@ -43,9 +53,9 @@ per_country AS (
 totals AS (
     SELECT
         artist_name,
-        SUM(streams) FILTER (WHERE recency = 1) AS streams,
-        SUM(streams) FILTER (WHERE recency = 2) AS previous_streams,
-        COUNT(DISTINCT country_code) FILTER (WHERE recency = 1) AS country_count
+        SUM(CASE WHEN recency = 1 THEN streams END) AS streams,
+        SUM(CASE WHEN recency = 2 THEN streams END) AS previous_streams,
+        COUNT(DISTINCT CASE WHEN recency = 1 THEN country_code END) AS country_count
     FROM per_country
     GROUP BY artist_name
 )
@@ -60,7 +70,7 @@ SELECT
     t.country_count,
     a.origin_country
 FROM totals t
-LEFT JOIN artists a ON a.artist_name = t.artist_name
+LEFT JOIN `{dataset}.artists` a ON a.artist_name = t.artist_name
 WHERE t.streams IS NOT NULL
 ORDER BY t.streams DESC
-LIMIT %(limit)s;
+LIMIT @limit;

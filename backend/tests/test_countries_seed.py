@@ -6,15 +6,53 @@ geo.getTopArtists matches on ISO 3166-1 names and fails *silently* (HTTP
 costs a country all its data with no error anywhere. That's not
 hypothetical - it's what happened with South Korea.
 """
+import csv
+
 import pytest
 
 from scripts.generate_countries_seed import (
     KWORB_COUNTRY_CODES,
     LASTFM_NAME_OVERRIDES,
+    OUTPUT_PATH,
     build_rows,
 )
 
 pytest.importorskip("pycountry")
+
+
+class TestCommittedSeedMatchesGenerator:
+    """The generator being correct is not the same as the file being correct.
+
+    Every test below this class passed while the committed CSV still carried
+    "Bolivia, Plurinational State of" and "Czechia" - the exact two values
+    the overrides exist to prevent - because nothing ever compared the
+    generator's output to the file on disk. Four countries silently collected
+    zero artists for as long as that drift went unnoticed.
+    """
+
+    def _committed_rows(self) -> list[dict]:
+        with OUTPUT_PATH.open(newline="", encoding="utf-8") as f:
+            return list(csv.DictReader(f))
+
+    def test_committed_csv_is_what_the_generator_produces(self):
+        assert self._committed_rows() == build_rows(KWORB_COUNTRY_CODES), (
+            "seeds/countries.csv is stale - rerun "
+            "`python -m scripts.generate_countries_seed`"
+        )
+
+    def test_no_committed_lastfm_name_uses_a_formal_iso_qualifier(self):
+        # Last.fm indexes countries by everyday name. The formal ISO variants
+        # all contain a comma ("Bolivia, Plurinational State of") and return
+        # an empty list rather than an error, so they can only be caught by
+        # looking for the shape. Genuine exceptions are pinned as overrides.
+        offenders = [
+            row["lastfm_name"]
+            for row in self._committed_rows()
+            if "," in row["lastfm_name"]
+            and row["kworb_code"] not in LASTFM_NAME_OVERRIDES
+            and row["lastfm_name"] != "Korea, Republic of"
+        ]
+        assert offenders == []
 
 
 class TestBuildRows:

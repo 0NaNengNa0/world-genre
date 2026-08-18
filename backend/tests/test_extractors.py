@@ -234,12 +234,34 @@ class TestMusicbrainzRetries:
 
 
 class TestDeezerExtractor:
-    def test_returns_first_match(self, monkeypatch):
+    def test_returns_exact_name_match_not_merely_the_first_result(self, monkeypatch):
+        # "Drake Bell" is a different artist, so ranking alone is not a
+        # decision. See test_deezer_matching.py for the full matching rules.
         payload = {"data": [{"id": 1, "name": "Drake"}, {"id": 2, "name": "Drake Bell"}]}
         monkeypatch.setattr(
             requests, "get", lambda *a, **k: FakeResponse(json_data=payload)
         )
         assert deezer.search_artist("Drake")["id"] == 1
+
+    def test_prefix_match_alone_is_not_accepted(self, monkeypatch):
+        payload = {"data": [{"id": 2, "name": "Drake Bell", "nb_fan": 900}]}
+        monkeypatch.setattr(
+            requests, "get", lambda *a, **k: FakeResponse(json_data=payload)
+        )
+        assert deezer.search_artist("Drake") is None
+
+    def test_requests_several_candidates(self, monkeypatch):
+        # A limit of 1 cannot express "the most-followed exact match", so the
+        # request itself is part of the fix and worth pinning.
+        seen = {}
+
+        def fake_get(url, params=None, **kwargs):
+            seen.update(params or {})
+            return FakeResponse(json_data={"data": []})
+
+        monkeypatch.setattr(requests, "get", fake_get)
+        deezer.search_artist("Drake")
+        assert seen["limit"] > 1
 
     def test_no_match_returns_none(self, monkeypatch):
         monkeypatch.setattr(

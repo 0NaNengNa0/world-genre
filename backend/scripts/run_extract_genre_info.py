@@ -21,12 +21,13 @@ import json
 import logging
 import os
 import time
+from datetime import datetime, timezone
 
 import requests
 from dotenv import load_dotenv
 
+from app.core.bq_load import merge_dimension
 from app.core.config import DATA_DIR, GENRE_BUCKETS
-from app.core.db import get_connection
 from app.services.extractors import lastfm
 
 CACHE_PATH = DATA_DIR / "raw" / "lastfm" / "genres.json"
@@ -88,19 +89,25 @@ def main() -> None:
 
     _save_cache(cache)
 
-    with get_connection() as conn, conn.cursor() as cur:
-        for genre, info in cache.items():
-            cur.execute(
-                """
-                INSERT INTO genres (genre, summary, url, resolved_at)
-                VALUES (%s, %s, %s, now())
-                ON CONFLICT (genre) DO UPDATE SET
-                    summary = EXCLUDED.summary,
-                    url = EXCLUDED.url,
-                    resolved_at = EXCLUDED.resolved_at
-                """,
-                (genre, (info or {}).get("summary"), (info or {}).get("url")),
-            )
+    # MERGE rather than an upsert statement: BigQuery has no ON CONFLICT, and
+    # the rows are written in one job instead of one statement per genre.
+    # `resolved_at` is set even for genres with no description, so later runs
+    # don't re-spend API calls retrying the same permanent blanks.
+    now = datetime.now(timezone.utc).isoformat()
+    merge_dimension(
+        "genres",
+        "genre",
+        [
+            {
+                "genre": genre,
+                "summary": (info or {}).get("summary"),
+                "url": (info or {}).get("url"),
+                "resolved_at": now,
+            }
+            for genre, info in cache.items()
+        ],
+        update_columns=["summary", "url", "resolved_at"],
+    )
 
     with_text = sum(1 for v in cache.values() if v)
     logger.info(

@@ -7,9 +7,21 @@ countries list or an env var only touches one file.
 import csv
 from pathlib import Path
 
+from app.core.storage import data_dir_from_env
+
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
+
+# Source files that ship inside the image. These must stay local paths even
+# when data moves to a bucket - they're code and reference data, versioned in
+# git, not pipeline output. SQL_DIR exists because the query files used to be
+# reached via DATA_DIR.parent, which quietly pointed them at the bucket root
+# the moment DATA_DIR became a gs:// URL.
 SEEDS_DIR = BACKEND_ROOT / "seeds"
-DATA_DIR = BACKEND_ROOT / "data"
+SQL_DIR = BACKEND_ROOT / "sql"
+
+# Pipeline output: local by default, a GCS bucket when DATA_DIR is set.
+# See app/core/storage.py.
+DATA_DIR = data_dir_from_env(BACKEND_ROOT / "data")
 
 
 def load_countries() -> list[dict]:
