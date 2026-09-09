@@ -268,29 +268,46 @@ Nothing long-lived is stored in GitHub, so there is no key to rotate or leak.
 The alternative — a JSON key in a repo secret — is a permanent private
 credential in a place that gets forked, cloned and screenshotted.
 
+Two APIs first. They are not in the enable list near the top of this file,
+because nothing before CD needed them:
+
+```powershell
+gcloud services enable iamcredentials.googleapis.com sts.googleapis.com
+```
+
+The deploy identity and its roles:
+
 ```powershell
 gcloud iam service-accounts create github-deployer `
   --display-name="GitHub Actions deployer"
 
-$SA = "github-deployer@world-genre-natt.iam.gserviceaccount.com"
+$SA = "serviceAccount:github-deployer@world-genre-natt.iam.gserviceaccount.com"
 
 foreach ($r in @(
-  "roles/run.admin",                # deploy revisions
-  "roles/cloudbuild.builds.editor", # submit builds
-  "roles/artifactregistry.writer",  # push the image
-  "roles/storage.objectAdmin"       # Cloud Build's staging bucket
+  "roles/run.admin",                        # deploy revisions
+  "roles/cloudbuild.builds.editor",         # submit builds
+  "roles/artifactregistry.writer",          # push the image
+  "roles/serviceusage.serviceUsageConsumer" # make API calls billed to this project
 )) {
-  gcloud projects add-iam-policy-binding world-genre-natt `
-    --member="serviceAccount:$SA" --role=$r
+  gcloud projects add-iam-policy-binding world-genre-natt --member=$SA --role=$r
 }
+
+# Cloud Build uploads the source archive to this bucket before building.
+# Bucket-scoped rather than project-wide: the identity needs this one bucket,
+# not all of Cloud Storage.
+gcloud storage buckets add-iam-policy-binding gs://world-genre-natt_cloudbuild `
+  --member=$SA --role="roles/storage.admin"
 
 # Cloud Run revisions run as the Compute default SA, and creating one means
 # impersonating it. Without this the deploy fails at the last step with a
 # permission error naming a service account you never referenced.
 gcloud iam service-accounts add-iam-policy-binding `
   411464225527-compute@developer.gserviceaccount.com `
-  --member="serviceAccount:$SA" --role=roles/iam.serviceAccountUser
+  --member=$SA --role=roles/iam.serviceAccountUser
 ```
+
+The pool, the provider, and the binding that lets *this repository* use the
+service account:
 
 ```powershell
 gcloud iam workload-identity-pools create github --location=global
@@ -301,7 +318,8 @@ gcloud iam workload-identity-pools providers create-oidc github-provider `
   --attribute-mapping="google.subject=assertion.sub,attribute.repository=assertion.repository" `
   --attribute-condition="assertion.repository=='0NaNengNa0/world-genre'"
 
-gcloud iam service-accounts add-iam-policy-binding $SA `
+gcloud iam service-accounts add-iam-policy-binding `
+  github-deployer@world-genre-natt.iam.gserviceaccount.com `
   --role=roles/iam.workloadIdentityUser `
   --member="principalSet://iam.googleapis.com/projects/411464225527/locations/global/workloadIdentityPools/github/attribute.repository/0NaNengNa0/world-genre"
 ```
@@ -311,9 +329,53 @@ provider without one, and correctly: the issuer is shared by every repository
 on GitHub, so an unconditioned provider lets *anyone's* workflow assume this
 service account. The condition is what narrows the trust to this repo.
 
+Verify before merging anything. This must print the exact string that
+`deploy-api.yml` carries as `workload_identity_provider`:
+
+```powershell
+gcloud iam workload-identity-pools providers describe github-provider `
+  --location=global --workload-identity-pool=github --format="value(name)"
+```
+
+A mismatch fails at the token exchange, and the error points at the exchange
+rather than at the mismatch.
+
 The provider path and service account are written into `deploy-api.yml`
 directly. Neither is a secret — the WIF grant is what authorizes, not knowledge
 of the identifier — so there is no repo secret to configure at all.
+
+### What the first three runs actually failed on
+
+None of these were build failures. All three were the CI identity lacking a
+permission that an Owner never notices they have, and each error named
+something other than the missing role. Recorded because the pattern is the
+point, not the specific roles.
+
+| Error said | Actually missing | Fix |
+| --- | --- | --- |
+| `forbidden from accessing the bucket [world-genre-natt_cloudbuild]` … `serviceusage.services.use` | Both, in one message | `serviceusage.serviceUsageConsumer` on the project, `storage.admin` on the staging bucket |
+| `can only stream logs if you are Viewer/Owner` | Read access to the **GCS** logs bucket | `options: logging: CLOUD_LOGGING_ONLY` in `cloudbuild.api.yaml` |
+| Same again | — | `--suppress-logs` on `gcloud builds submit` |
+
+The second one is worth understanding rather than memorising. Cloud Build's
+default `LEGACY` logging writes to **two** destinations — Cloud Logging *and* a
+Google-managed GCS bucket — and `gcloud builds submit` streams from the bucket.
+So `roles/logging.viewer` looks like the obvious fix and does nothing: it grants
+the wrong destination. Meanwhile the build itself was running and succeeding the
+whole time; only gcloud's ability to narrate it had failed, and the non-zero
+exit made a healthy build look broken. **Check the system's own record — Cloud
+Build history — before believing a wrapper's exit code.**
+
+`CLOUD_LOGGING_ONLY` removes the bucket destination entirely, so the permission
+is no longer needed by anyone. `--suppress-logs` makes the step independent of
+log access regardless of how the defaults shift later. Belt and braces, because
+this failure mode costs a full deploy cycle to diagnose.
+
+One loose end: `roles/storage.objectAdmin` was granted project-wide while
+debugging the first error, and is probably redundant now that the staging bucket
+carries its own binding. Confirm with the Policy Troubleshooter before removing
+it — an unused grant on a CI identity is exactly the kind of thing that is
+easier to remove now than to justify in a review later.
 
 ### Rolling back
 
