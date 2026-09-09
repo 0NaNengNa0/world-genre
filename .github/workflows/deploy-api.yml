@@ -97,8 +97,8 @@ jobs:
       - name: Build image
         run: |
           gcloud builds submit --config cloudbuild.api.yaml \
+            --suppress-logs \
             --substitutions=_IMAGE=${IMAGE}:${GITHUB_SHA}
-
       # --set-env-vars replaces the whole environment, which is correct while
       # PUBLISH_DIR is the only variable. If a second one is ever added, this
       # must become --update-env-vars or the new one is silently dropped.
