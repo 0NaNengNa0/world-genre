@@ -14,5 +14,13 @@
       "tagState": "untagged",
       "olderThan": "7d"
     }
+  },
+  {
+    "name": "delete-old-tagged",
+    "action": { "type": "Delete" },
+    "condition": {
+      "tagState": "tagged",
+      "olderThan": "30d"
+    }
   }
 ]
