@@ -2,8 +2,20 @@ name: Backend CI
 
 # Only runs on backend changes - the frontend has its own build/lint step
 # via Vite and doesn't need Python tooling to validate it.
+#
+# workflow_call makes this job callable from another workflow, which is how
+# deploy-api.yml gates a deploy on the tests. The obvious alternative -
+# triggering deploy on `workflow_run: [Backend CI]` - is a trap here: the path
+# filters below mean a frontend-only commit never runs this workflow, so
+# workflow_run would never fire and that commit would silently never deploy.
+# Reusing the job instead keeps one definition of "the tests" with two callers.
 on:
+  workflow_call:
   push:
+    # main is excluded because deploy-api.yml already calls this workflow on
+    # every push to main. Without this the same tests run twice per merge.
+    branches-ignore:
+      - main
     paths:
       - "backend/**"
       - ".github/workflows/backend-ci.yml"

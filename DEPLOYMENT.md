@@ -230,9 +230,111 @@ gcloud artifacts repositories set-cleanup-policies world-genre `
   --location=asia-southeast3 --policy=cleanup.json
 ```
 
-`cleanup.json` keeps the three most recent versions and deletes untagged ones
-after 7 days. `Keep` is evaluated before `Delete`, so recent versions survive
-regardless. Add `--dry-run` to see what would be removed before committing.
+`cleanup.json` keeps the three most recent versions, deletes untagged ones
+after 7 days, and deletes tagged ones after 30. `Keep` is evaluated before
+`Delete`, so recent versions survive regardless. Add `--dry-run` to see what
+would be removed before committing.
+
+> The third rule exists because of CI. A manual `gcloud builds submit --tag`
+> reuses one tag, so each build untags its predecessor and the 7-day untagged
+> rule sweeps it up. The GitHub Actions deploy tags every image with its commit
+> SHA instead — nothing is ever untagged, that rule stops matching, and storage
+> grows forever. `Keep` rules protect, they do not delete, so `keep-recent-tagged`
+> alone would not have caught it.
+
+---
+
+## Continuous deployment
+
+`.github/workflows/deploy-api.yml` runs the sequence above on every push to
+`main`: tests, frontend build, Cloud Build, `gcloud run deploy`, smoke test.
+The manual commands still work and are still the reference for what each step
+does — CI is not a second way of building, it calls the same
+`cloudbuild.api.yaml`.
+
+Two workflows, one test job. `backend-ci.yml` gained a `workflow_call` trigger
+so `deploy-api.yml` can reuse it via `uses:`. The obvious alternative —
+triggering the deploy on `workflow_run: [Backend CI]` — is broken by the path
+filters: a frontend-only commit never runs Backend CI, so `workflow_run` never
+fires and that commit silently never deploys. `backend-ci.yml`'s push trigger
+now ignores `main`, since the deploy workflow already runs it there.
+
+### Authentication
+
+**Workload Identity Federation, not a service account key.** GitHub mints a
+short-lived OIDC token asserting which repository the run came from; GCP is
+configured to trust that issuer and exchanges it for a ~1-hour access token.
+Nothing long-lived is stored in GitHub, so there is no key to rotate or leak.
+The alternative — a JSON key in a repo secret — is a permanent private
+credential in a place that gets forked, cloned and screenshotted.
+
+```powershell
+gcloud iam service-accounts create github-deployer `
+  --display-name="GitHub Actions deployer"
+
+$SA = "github-deployer@world-genre-natt.iam.gserviceaccount.com"
+
+foreach ($r in @(
+  "roles/run.admin",                # deploy revisions
+  "roles/cloudbuild.builds.editor", # submit builds
+  "roles/artifactregistry.writer",  # push the image
+  "roles/storage.objectAdmin"       # Cloud Build's staging bucket
+)) {
+  gcloud projects add-iam-policy-binding world-genre-natt `
+    --member="serviceAccount:$SA" --role=$r
+}
+
+# Cloud Run revisions run as the Compute default SA, and creating one means
+# impersonating it. Without this the deploy fails at the last step with a
+# permission error naming a service account you never referenced.
+gcloud iam service-accounts add-iam-policy-binding `
+  411464225527-compute@developer.gserviceaccount.com `
+  --member="serviceAccount:$SA" --role=roles/iam.serviceAccountUser
+```
+
+```powershell
+gcloud iam workload-identity-pools create github --location=global
+
+gcloud iam workload-identity-pools providers create-oidc github-provider `
+  --location=global --workload-identity-pool=github `
+  --issuer-uri="https://token.actions.githubusercontent.com" `
+  --attribute-mapping="google.subject=assertion.sub,attribute.repository=assertion.repository" `
+  --attribute-condition="assertion.repository=='0NaNengNa0/world-genre'"
+
+gcloud iam service-accounts add-iam-policy-binding $SA `
+  --role=roles/iam.workloadIdentityUser `
+  --member="principalSet://iam.googleapis.com/projects/411464225527/locations/global/workloadIdentityPools/github/attribute.repository/0NaNengNa0/world-genre"
+```
+
+`--attribute-condition` is not optional — gcloud refuses to create a GitHub
+provider without one, and correctly: the issuer is shared by every repository
+on GitHub, so an unconditioned provider lets *anyone's* workflow assume this
+service account. The condition is what narrows the trust to this repo.
+
+The provider path and service account are written into `deploy-api.yml`
+directly. Neither is a secret — the WIF grant is what authorizes, not knowledge
+of the identifier — so there is no repo secret to configure at all.
+
+### Rolling back
+
+Images are tagged with the commit SHA, so a revision is traceable to a commit
+and the previous one is still there:
+
+```powershell
+gcloud run revisions list --service=world-genre-api --region=asia-southeast3
+
+gcloud run services update-traffic world-genre-api `
+  --region=asia-southeast3 --to-revisions=PREVIOUS_REVISION=100
+```
+
+This shifts traffic to an image that already exists; it does not rebuild, so it
+takes seconds and cannot fail the way a re-deploy of an older commit can.
+
+### What this does not cover
+
+Only the API. The pipeline still runs on demand — see *Scheduling* below. A CD
+pipeline that ships the serving layer while the data behind it is refreshed by
+hand is a real gap, not an oversight to gloss over.
 
 ---
 

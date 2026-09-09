@@ -1,0 +1,141 @@
+name: Deploy API
+
+# Continuous deployment of the API image to Cloud Run. This is the automated
+# form of the manual sequence in DEPLOYMENT.md; that section is still the
+# reference for what each step does and why.
+#
+# Continuous *deployment*, not delivery: main goes to production with no human
+# gate. That is a deliberate choice for a single-maintainer project with a
+# smoke test and a one-command rollback. Adding a gate later means wrapping the
+# deploy job in a GitHub Environment with required reviewers - no other change.
+on:
+  push:
+    branches:
+      - main
+  # Lets a deploy be re-run without an empty commit, e.g. after fixing IAM.
+  workflow_dispatch:
+
+# Two merges a minute apart would otherwise race, and the slower build can
+# finish last and overwrite the newer revision. Queue instead of cancelling:
+# a cancelled deploy can leave an image pushed but never rolled out.
+concurrency:
+  group: deploy-api
+  cancel-in-progress: false
+
+jobs:
+  # Reuses the exact job that runs on PRs, rather than re-declaring the steps.
+  # A green PR and a green deploy therefore mean the same thing.
+  test:
+    uses: ./.github/workflows/backend-ci.yml
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      # Required for Workload Identity Federation: it is what lets the runner
+      # request an OIDC token. Omitting it fails inside google-github-actions/
+      # auth with a message about a missing token URL, which does not obviously
+      # point back to this block.
+      id-token: write
+
+    env:
+      PROJECT_ID: world-genre-natt
+      REGION: asia-southeast3
+      SERVICE: world-genre-api
+      IMAGE: asia-southeast3-docker.pkg.dev/world-genre-natt/world-genre/api
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Keyless auth. GitHub mints a short-lived OIDC token asserting the repo
+      # and ref; GCP trusts that issuer and exchanges it for a ~1h access
+      # token. The alternative - a service account JSON key in a repo secret -
+      # is a long-lived private credential that nobody ever rotates. Nothing
+      # durable is stored here, so there is nothing to leak or revoke.
+      #
+      # Setup for the provider and the deployer service account is in
+      # DEPLOYMENT.md under "Continuous deployment".
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/411464225527/locations/global/workloadIdentityPools/github/providers/github-provider
+          service_account: github-deployer@world-genre-natt.iam.gserviceaccount.com
+
+      # project_id is set explicitly rather than inherited. The auth step does
+      # set a default, but a gcloud command that silently targets the wrong
+      # project is a bad failure to debug, and pinning it costs one line.
+      - uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+
+      # The image COPYs frontend/dist rather than building it, so the SPA has
+      # to exist on disk before the build context is uploaded. This mirrors the
+      # `npm --prefix frontend run build` step in the manual sequence.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend
+        run: |
+          npm ci --prefix frontend
+          npm --prefix frontend run build
+
+      # Built by Cloud Build using cloudbuild.api.yaml rather than by `docker
+      # build` here. A runner-side build would be faster, but it would restate
+      # the repo-root context and --file that cloudbuild.api.yaml already owns,
+      # and the day the two drift the local build and CI build stop producing
+      # the same image. One build definition, two callers.
+      #
+      # Tagged by commit SHA, not a floating tag: this is what makes "which
+      # commit is in production" and "roll back to the previous one" answerable
+      # after the fact. See the cleanup.json note - permanent tags change how
+      # the Artifact Registry retention policy behaves.
+      - name: Build image
+        run: |
+          gcloud builds submit --config cloudbuild.api.yaml \
+            --substitutions=_IMAGE=${IMAGE}:${GITHUB_SHA}
+
+      # --set-env-vars replaces the whole environment, which is correct while
+      # PUBLISH_DIR is the only variable. If a second one is ever added, this
+      # must become --update-env-vars or the new one is silently dropped.
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy ${SERVICE} \
+            --image ${IMAGE}:${GITHUB_SHA} \
+            --region ${REGION} \
+            --allow-unauthenticated \
+            --set-env-vars PUBLISH_DIR=gs://world-genre-serving/published
+
+      # Read the URL back from the service rather than hardcoding it, so the
+      # smoke test cannot pass against a stale address if the service is ever
+      # recreated in another project or region.
+      - name: Resolve service URL
+        run: |
+          echo "SERVICE_URL=$(gcloud run services describe ${SERVICE} \
+            --region ${REGION} --format='value(status.url)')" >> "$GITHUB_ENV"
+
+      # Gates on HTTP status, not on the body of /api/health. `degraded` there
+      # means the publish stage has not run - a data problem, not a bad deploy -
+      # and failing the deploy on it would block shipping code every time the
+      # pipeline is behind. Checking the root separately distinguishes "image
+      # is missing frontend/dist" from "container is broken"; see the health/
+      # root table in DEPLOYMENT.md.
+      - name: Smoke test
+        run: |
+          curl -fsS "${SERVICE_URL}/api/health"
+          echo
+          curl -fsS -o /dev/null -w "root: %{http_code}\n" "${SERVICE_URL}/"
+
+      # Printed so the rollback command is in the log of the run that broke
+      # things, rather than something to reconstruct under pressure.
+      - name: Print rollback command
+        if: always()
+        run: |
+          echo "Roll back with:"
+          echo "  gcloud run services update-traffic ${SERVICE} --region ${REGION} --to-revisions=PREVIOUS_REVISION=100"
+          gcloud run revisions list --service=${SERVICE} --region=${REGION} --limit=5 \
+            --format="table(name, active, creationTimestamp)" || true
