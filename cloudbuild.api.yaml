@@ -29,3 +29,14 @@ steps:
 # inexplicable "image not found" at deploy time.
 images:
   - ${_IMAGE}
+
+# Cloud Build's default (LEGACY) writes logs to BOTH Cloud Logging and a
+# Google-managed GCS bucket. gcloud streams from that bucket, and a service
+# account that is not project Viewer/Owner cannot read it - which surfaces as
+# "This tool can only stream logs if you are Viewer/Owner of the project" and
+# a non-zero exit, even though the build itself started fine and usually
+# succeeds. Writing to Cloud Logging only removes the bucket, and with it the
+# failure mode; the deploy workflow also passes --suppress-logs so the step
+# never depends on reading logs at all.
+options:
+  logging: CLOUD_LOGGING_ONLY
