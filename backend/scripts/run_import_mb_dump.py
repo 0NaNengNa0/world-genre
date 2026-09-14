@@ -127,50 +127,88 @@ def name_rows(payload: dict) -> list[dict]:
     return rows
 
 
+def _iter_lines(stream):
+    """Non-empty lines from a streamed tar member, as bytes.
+
+    Chunked by hand rather than wrapped in io.TextIOWrapper: in streaming mode
+    tarfile hands back a member object with no seekable(), which TextIOWrapper
+    calls on construction. Reading 1 MiB at a time and splitting on newlines
+    keeps the whole thing streaming - the archive is gigabytes and must never
+    be materialised - and json.loads takes bytes directly.
+    """
+    buffer = b""
+    while True:
+        chunk = stream.read(1 << 20)
+        if not chunk:
+            break
+        buffer += chunk
+        *complete, buffer = buffer.split(b"\n")
+        for line in complete:
+            line = line.strip()
+            if line:
+                yield line
+    if buffer.strip():
+        yield buffer.strip()
+
+
+def _is_record_line(line: bytes) -> bool:
+    """Does this line look like one of the dump's JSON entity records?"""
+    try:
+        return isinstance(json.loads(line), dict)
+    except json.JSONDecodeError:
+        return False
+
+
 def iter_records(fileobj) -> "object":
     """Yield parsed JSON records from a streamed `.tar.xz` dump.
 
-    Streaming mode (`r|xz`) rather than random access: the archive is several
+    Streaming mode (`r|xz`) rather than random access: the archive is
     gigabytes and `r:xz` would want to seek, which a network response body
-    cannot do. The cost is that members must be read in order and only once,
-    which is fine - there is one data member that matters.
+    cannot do. Members are therefore read in order and only once.
 
-    Blank lines are skipped rather than raising; a malformed line raises,
-    because silently dropping records from a reference import is how a join
-    quietly loses 3% of its rows.
+    WHICH MEMBER HOLDS THE DATA IS DECIDED BY CONTENT, NOT BY NAME. An earlier
+    version skipped a hardcoded list of metadata filenames - COPYING, README,
+    TIMESTAMP, SCHEMA_SEQUENCE - and the real archive promptly produced
+    REPLICATION_SEQUENCE, which contains a bare integer. `json.loads` parses
+    that happily into an int, and the first `.get("id")` downstream died on
+    it. A denylist fails on the first entry you did not think of, and the unit
+    test could not have caught it because its fixture contained exactly the
+    names the denylist knew about.
+
+    So: peek the first line of each member and read it only if that line
+    parses as a JSON object. TIMESTAMP (a date string) fails to parse,
+    REPLICATION_SEQUENCE parses as an int, the checksum files fail to parse -
+    all skipped without needing to be named.
+
+    Within a data member the rules are stricter: a blank line is skipped, but
+    a malformed line or a non-object raises, because silently dropping records
+    from a reference import is how a join quietly loses a percent of its rows
+    with nothing in the logs.
     """
     with tarfile.open(fileobj=fileobj, mode="r|xz") as tar:
         for member in tar:
             if not member.isfile():
                 continue
-            # The archive carries a checksum/timestamp alongside the data;
-            # only the entity file has records in it.
-            if member.name.rsplit("/", 1)[-1] in {"COPYING", "README", "TIMESTAMP",
-                                                  "SCHEMA_SEQUENCE"}:
-                continue
             stream = tar.extractfile(member)
             if stream is None:
                 continue
+
+            lines = _iter_lines(stream)
+            first = next(lines, None)
+            if first is None or not _is_record_line(first):
+                logger.debug("skipping %s (no JSON records)", member.name)
+                continue
+
             logger.info("reading %s", member.name)
-            # Chunked by hand rather than wrapped in io.TextIOWrapper: in
-            # streaming mode tarfile hands back a member object that has no
-            # seekable(), which TextIOWrapper calls on construction. Reading
-            # 1 MiB at a time and splitting on newlines keeps the whole thing
-            # streaming - the archive is gigabytes and must never be
-            # materialised - and json.loads takes bytes directly.
-            buffer = b""
-            while True:
-                chunk = stream.read(1 << 20)
-                if not chunk:
-                    break
-                buffer += chunk
-                *complete, buffer = buffer.split(b"\n")
-                for line in complete:
-                    line = line.strip()
-                    if line:
-                        yield json.loads(line)
-            if buffer.strip():
-                yield json.loads(buffer)
+            yield json.loads(first)
+            for line in lines:
+                record = json.loads(line)
+                if not isinstance(record, dict):
+                    raise ValueError(
+                        f"{member.name}: expected a JSON object per line, got "
+                        f"{type(record).__name__}"
+                    )
+                yield record
 
 
 def _open_source(source: str):

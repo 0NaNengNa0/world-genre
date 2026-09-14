@@ -129,18 +129,27 @@ class TestNameRows:
         assert name_rows({"name": "BTS"}) == []
 
 
-def _make_dump(records: list[dict]) -> io.BytesIO:
-    """A tar.xz shaped like the published dump: metadata plus one data file."""
+def _make_dump(records: list[dict], extra: list[tuple[str, bytes]] | None = None):
+    """A tar.xz shaped like the published dump: metadata plus one data file.
+
+    The metadata members here are the ones the REAL archive carries, including
+    REPLICATION_SEQUENCE - which broke the first version of this importer,
+    because it holds a bare integer that `json.loads` parses successfully into
+    something that is not a record. The original fixture listed only the
+    metadata files the code already skipped by name, so it agreed with the bug
+    instead of catching it.
+    """
     buf = io.BytesIO()
+    members = [
+        ("mbdump/TIMESTAMP", b"2026-09-14 00:00:00\n"),
+        ("mbdump/COPYING", b"CC0\n"),
+        ("mbdump/REPLICATION_SEQUENCE", b"142857\n"),
+        ("mbdump/SCHEMA_SEQUENCE", b"31\n"),
+        *(extra or []),
+        ("mbdump/artist", b"".join(json.dumps(r).encode() + b"\n" for r in records)),
+    ]
     with tarfile.open(fileobj=buf, mode="w:xz") as tar:
-        for name, body in [
-            ("mbdump/TIMESTAMP", b"2026-09-14 00:00:00\n"),
-            ("mbdump/COPYING", b"CC0\n"),
-            (
-                "mbdump/artist",
-                b"".join(json.dumps(r).encode() + b"\n" for r in records),
-            ),
-        ]:
+        for name, body in members:
             info = tarfile.TarInfo(name)
             info.size = len(body)
             tar.addfile(info, io.BytesIO(body))
@@ -152,6 +161,25 @@ class TestIterRecords:
     def test_reads_records_and_ignores_the_metadata_members(self):
         dump = _make_dump([{"id": "a"}, {"id": "b"}])
         assert [r["id"] for r in iter_records(dump)] == ["a", "b"]
+
+    def test_a_metadata_file_holding_a_bare_number_is_not_a_record(self):
+        # REPLICATION_SEQUENCE contains something like "142857". That IS valid
+        # JSON - an int - so a parser that only catches JSONDecodeError sails
+        # straight past it and hands an int to code expecting a dict.
+        dump = _make_dump([{"id": "a"}])
+        assert [r["id"] for r in iter_records(dump)] == ["a"]
+
+    def test_an_unknown_metadata_file_is_skipped_without_being_named(self):
+        # The point of deciding by content rather than by filename: a member
+        # nobody anticipated costs nothing.
+        dump = _make_dump(
+            [{"id": "a"}], extra=[("mbdump/SOMETHING_NEW", b"whatever this is\n")]
+        )
+        assert [r["id"] for r in iter_records(dump)] == ["a"]
+
+    def test_a_json_array_line_is_not_mistaken_for_a_record(self):
+        dump = _make_dump([{"id": "a"}], extra=[("mbdump/LIST", b'["not", "a", "record"]\n')])
+        assert [r["id"] for r in iter_records(dump)] == ["a"]
 
     def test_blank_lines_are_skipped(self):
         buf = io.BytesIO()

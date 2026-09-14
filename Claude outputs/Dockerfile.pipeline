@@ -1,0 +1,67 @@
+# The pipeline image: every scripts/run_*.py stage, executed as a Cloud Run Job.
+#
+# THIS REPO NOW HAS THREE DOCKERFILES, which is worth justifying rather than
+# apologising for:
+#
+#   backend/Dockerfile          FROM apache/airflow - the local Airflow image.
+#                               Wrong base entirely for a job: it carries the
+#                               whole Airflow runtime and its entrypoint is
+#                               Airflow's, not python's.
+#   backend/Dockerfile.api      Has a uvicorn CMD and COPYs frontend/dist. It
+#                               is a long-running server; a job is not.
+#   backend/Dockerfile.pipeline This one. No server, no Airflow, no frontend.
+#
+# They cannot be merged. Airflow 3 ships its own pinned FastAPI and pydantic,
+# so installing the API's versions alongside them breaks Airflow's api-server -
+# the same reason requirements-pipeline.txt deliberately excludes the API deps.
+#
+# Build context is the REPO ROOT (see cloudbuild.pipeline.yaml), matching
+# Dockerfile.api. The pipeline doesn't need anything outside backend/, so a
+# backend/ context would work and upload slightly less - but .gcloudignore
+# lives at the repo root and is load-bearing (see its own header), and having
+# one tested ignore file is worth more than saving a megabyte of upload.
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+WORKDIR /app
+
+# Dependencies first, as their own layer: they change far less often than
+# application code, so edits to app/ or scripts/ reuse the cached pip install.
+#
+# requirements-pipeline.txt, NOT requirements.txt. The latter pulls in
+# fastapi/uvicorn/pydantic, and nothing a job runs imports them - run_publish
+# writes JSON to a bucket, it does not serve it. Cloud Run bills cold starts on
+# image size, and a job that runs 11 times a day cold-starts 11 times.
+#
+# requirements-cloud.txt is mandatory here rather than optional: DATA_DIR and
+# PUBLISH_DIR are gs:// URLs in this environment, and cloudpathlib is what
+# makes a GSPath resolvable. Without it the job starts and fails on first read.
+COPY backend/requirements-pipeline.txt backend/requirements-cloud.txt ./
+RUN pip install --no-cache-dir -r requirements-pipeline.txt -r requirements-cloud.txt
+
+# Everything a stage touches at runtime, and nothing else.
+#
+# backend/data is deliberately absent - it belongs in the bucket DATA_DIR
+# points at. Baking a snapshot into the image would give every job execution a
+# stale MusicBrainz cache that no pipeline run could refresh, which is the
+# opposite of the point: the cache in the bucket is what turns a 33-minute cold
+# crawl into an 8-minute run.
+COPY backend/app ./app
+COPY backend/scripts ./scripts
+COPY backend/sql ./sql
+COPY backend/seeds ./seeds
+
+# `python` as the entrypoint is the whole contract with Cloud Workflows: each
+# step overrides the container args with ["-m", "scripts.run_load"] and so on,
+# so one job definition covers every stage. Anything else here - a shell
+# wrapper, a hardcoded module - would mean either eleven job definitions to
+# keep in sync or an extra layer of string parsing between the orchestrator
+# and the code.
+ENTRYPOINT ["python"]
+
+# Executed with no args override, `python` alone would open a REPL, find no
+# stdin, and exit 0 - a silent success that did nothing, which is the worst
+# available default for a scheduled job. Fail loudly instead.
+CMD ["-c", "import sys; sys.exit('No pipeline stage given - override the container args, e.g. -m scripts.run_load')"]
