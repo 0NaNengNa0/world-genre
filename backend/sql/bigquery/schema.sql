@@ -263,3 +263,56 @@ CREATE TABLE IF NOT EXISTS `{dataset}.cleanse_quality` (
 )
 PARTITION BY snapshot_date
 CLUSTER BY country_code;
+
+-- MusicBrainz artist catalogue, imported in bulk by
+-- scripts/run_import_mb_dump.py from the published JSON dumps.
+--
+-- A MIRROR of an external source, which is what makes truncate-and-load the
+-- right write pattern for it - the exact opposite of `artists`, where
+-- merge_dimension protects enrichment columns that several scripts own.
+-- Deciding which of those two a table is should happen before choosing how to
+-- write it; getting it backwards silently destroys work.
+--
+-- Not partitioned: there is no date grain, and at a few million rows this is
+-- well inside the size where clustering alone is enough.
+CREATE TABLE IF NOT EXISTS `{dataset}.mb_artists` (
+    mbid STRING NOT NULL,
+    name STRING NOT NULL,
+    sort_name STRING,
+    -- ISO 3166-1 alpha-2, lowercased, matching countries.code. Nullable
+    -- because MusicBrainz coverage of smaller artists is genuinely partial -
+    -- that is reported as coverage, never filled with a guess.
+    country STRING,
+    formed_year INT64,
+    -- Person, Group, Orchestra, ... Free to carry, and a plausible
+    -- tie-breaker when two artists share a name.
+    artist_type STRING,
+    imported_at TIMESTAMP NOT NULL,
+    PRIMARY KEY (mbid) NOT ENFORCED
+)
+CLUSTER BY mbid;
+
+-- Name-to-MBID index: one row per distinct normalised name an artist answers
+-- to, primary names and aliases alike.
+--
+-- This table is the whole reason the dump beats the API for matching. Chart
+-- rows carry whatever spelling a streaming service used, and matching on the
+-- primary name alone loses every artist known by another. Flattening aliases
+-- into rows turns matching into an equality join rather than a fuzzy scan.
+--
+-- `match_name` is written by app/services/cleansing.normalize_artist_name at
+-- import time, so both sides of the join are normalised by identical code.
+-- Normalising one side at load time and the other at query time is how a join
+-- silently misses half its rows.
+--
+-- NOT unique on match_name, deliberately: distinct artists genuinely share
+-- names. `is_primary` is the tie-breaker - a primary-name match should beat an
+-- alias match, and a tie between two primaries should resolve to nothing
+-- rather than to a guess.
+CREATE TABLE IF NOT EXISTS `{dataset}.mb_artist_names` (
+    match_name STRING NOT NULL,
+    mbid STRING NOT NULL,
+    is_primary BOOL NOT NULL,
+    FOREIGN KEY (mbid) REFERENCES `{dataset}.mb_artists` (mbid) NOT ENFORCED
+)
+CLUSTER BY match_name;

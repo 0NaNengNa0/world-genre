@@ -534,26 +534,92 @@ cent.
 
 ---
 
-## Scheduling (not deployed)
+## Scheduling — DEPLOYED
 
-The pipeline currently runs on demand. The plan is written out as
-`pipeline-workflow.yaml` at the repo root: **Cloud Run Jobs driven by Cloud
-Workflows, triggered daily by Cloud Scheduler.**
+**The pipeline has been running nightly since August.** This section said
+otherwise until 2026-09-14, and so did every other document in this repo. It was
+wrong. What actually exists:
 
-Jobs, not Services, because jobs run to completion and tolerate long timeouts —
-the MusicBrainz crawl alone runs 33 minutes cold, and a Service would need a
-request held open for the duration. One job with container args overridden per
-stage rather than one job per stage: fewer resources to create and keep in sync,
-and straightforward to express in Terraform later. The cost is that every stage
-shares one CPU, memory and timeout configuration, so splitting out the
-MusicBrainz stage is the first move if that pinches.
+| Resource | Value |
+| --- | --- |
+| Cloud Scheduler job | `world-genre-weekly`, **location `asia-southeast1`** |
+| Schedule | `0 0 * * *`, time zone `Asia/Bangkok` → 17:00 UTC daily |
+| Target | POST to `…/jobs/world-genre-pipeline:run` in `asia-southeast3` |
+| Cloud Run Job | `world-genre-pipeline`, `asia-southeast3`, 1 CPU / 1 GiB |
+| Timeout / retries | 7200s / `maxRetries: 1` |
+| Service account | `411464225527-compute@developer.gserviceaccount.com` |
+| `BQ_DATASET` | `world-genre-natt.world_genre` |
+| `DATA_DIR` | `gs://world_genre_bucket/data` |
+| `PUBLISH_DIR` | `gs://world-genre-serving/published` |
+| `LASTFM_API_KEY` | Secret Manager, `lastfm-api-key:latest` |
 
-Workflows rather than Scheduler alone, because Scheduler gives one trigger and
-nothing else. Workflows restores the parts of the DAG actually in use: ordered
-steps, parallel branches, per-step retries, and a conditional — the gate runs
-beside the enrichment stages and sets a shared flag rather than raising, so a
-blocked run still keeps its rate-limited enrichment work. Publish is skipped;
-the pipeline is not.
+The Scheduler job is **named** `world-genre-weekly` and runs **daily** — a
+leftover from when it really was weekly, the same vintage as the `@weekly` that
+was in the DAG until today. The cron is the truth; the name is not.
+
+Note the two regions. Cloud Scheduler has no `asia-southeast3` location (run
+`gcloud scheduler locations list`), so the trigger lives in `asia-southeast1`
+and calls across. Looking for it in the job's own region finds nothing and
+invites the conclusion that nothing is scheduled.
+
+The job carries **no `command` and no `args`** — it runs the image's default
+entrypoint, which is `scripts/run_pipeline.py`. One execution, all twelve
+stages, about 36 minutes.
+
+### The recovered sequence
+
+Until 2026-09-14 the driver that ran these stages existed only inside the
+container image; no Dockerfile in this repo built it, and it was not in git.
+`backend/scripts/run_pipeline.py` is that sequence reimplemented from the job's
+own Cloud Logging output, with the data-quality gate added before publish:
+
+| Stage | Typical | Notes |
+| --- | --- | --- |
+| init_bq | 6s | idempotent, runs nightly |
+| extract_kworb | 301s | |
+| extract_lastfm | 131s | |
+| extract_musicbrainz | 215s | |
+| extract_deezer | 29s | |
+| extract_wikidata | 8s | only deezer's misses |
+| cleanse | 44s | |
+| load | 44s | |
+| **enrich_artists** | **1344s** | 62% of the run; see the rate-limit note below |
+| enrich_genres | 4s | 147 of 149 genres have text |
+| **validate** | — | new; blocks publish only |
+| publish | 43s | |
+
+### The MusicBrainz rate limit is an IP problem
+
+`enrich_artists` spends 22 minutes to resolve ~53 artists against ~1,591
+outstanding, almost all of it absorbing `503 rate-limited` responses. The
+extractor is not at fault: it sends a descriptive User-Agent with a contact
+address, honours `Retry-After`, and paces at ~1 req/sec, which is what
+MusicBrainz asks for.
+
+**MusicBrainz rate-limits per IP, and Cloud Run egress uses a shared address
+pool.** The budget is not yours; you share it with whoever else is behind the
+same address. The same code runs fine from a laptop. Options, none free: a
+static egress IP via Cloud NAT (a fixed monthly charge that is material against
+a project otherwise costing pennies — price it before committing), running that
+one stage from somewhere with a stable address, or accepting that the artists
+dimension may never fully converge and saying so rather than implying it will.
+
+### Where Cloud Workflows fits now
+
+`pipeline-workflow.yaml` describes a per-stage model: one Cloud Run Job
+execution per stage, ordered and branched by Workflows. That is an *upgrade*
+path, not the current design, and it is not deployed. Its advantage is per-stage
+visibility and retries — with today's single execution, a failure in
+`enrich_artists` and a failure in `publish` look identical from outside. Its
+cost is that the gate's exit code becomes invisible (Workflows sees only "the
+job failed"), so the 1-vs-2 distinction would need a BigQuery step querying
+`dq_runs`.
+
+**Cloud Composer is deliberately not used.** Airflow is free; Composer is not —
+it bills for an always-on scheduler, web server and GKE cluster, roughly
+$400/month to run a pipeline that executes for minutes a day. That is 40× the
+rest of this project combined. `backend/dags/genre_pipeline_dag.py` stays in the
+repo as the documented orchestration and for local `docker-compose` runs.
 
 **Cloud Composer is deliberately not used.** Airflow is free; Composer is not —
 it bills for an always-on scheduler, web server and GKE cluster, roughly
@@ -566,12 +632,57 @@ comment: it sees only "the job failed", not the exit code, so `run_validate`'s
 1-vs-2 distinction is invisible there (the fix, if it mattered, is a BigQuery
 connector step querying `dq_runs`); and there is no backfill or task-level UI.
 
-Still outstanding before any of it can run: a **pipeline container image** —
-`Dockerfile.api` builds the API and the Airflow image is the wrong shape for a
-job. And **test one extractor from a Cloud Run Job before building on it**:
-these would run from a datacentre IP rather than a home connection, and
-MusicBrainz throttles those harder while scrapers sometimes block cloud ranges
-outright.
+The DAG's `schedule` must match the Scheduler cron. They disagreed until
+2026-09-14 (`@weekly` in the DAG, daily in production), which matters because
+every threshold in `app/core/dq.py` is calibrated against daily partitions —
+`chart_volume`'s trailing-7-day median would collapse to a single observation at
+weekly cadence. Both now say daily. The DAG's `0 3 * * *` is UTC and does not
+match production's midnight Bangkok (17:00 UTC); since the DAG is not deployed
+this changes nothing operationally, but it is worth aligning next time the file
+is touched.
+
+### The pipeline image
+
+`backend/Dockerfile.pipeline`, built by `cloudbuild.pipeline.yaml`. A third
+image, deliberately: the Airflow image's entrypoint is Airflow's, and the API
+image cannot be built without `frontend/dist` — a broken `npm run build` must
+not be able to block a data pipeline deploy.
+
+```powershell
+gcloud builds submit --config cloudbuild.pipeline.yaml `
+  --substitutions=_IMAGE=asia-southeast3-docker.pkg.dev/world-genre-natt/world-genre/pipeline
+```
+
+It installs `requirements-pipeline.txt` and `requirements-cloud.txt` only — no
+fastapi, no uvicorn. `ENTRYPOINT ["python"]` is the contract with Workflows:
+each step overrides the container args (`-m scripts.run_load`), so one job
+definition covers all eleven stages. With no args it exits non-zero with a
+message rather than opening a REPL and succeeding silently.
+
+The same repo-root `.gcloudignore` governs this build; it excludes
+`backend/data/` and `backend/tests/` and nothing the image COPYs, so no second
+ignore file is needed.
+
+Then the job:
+
+```powershell
+gcloud run jobs create world-genre-pipeline `
+  --image=asia-southeast3-docker.pkg.dev/world-genre-natt/world-genre/pipeline `
+  --region=asia-southeast3 `
+  --task-timeout=3600 --max-retries=1 `
+  --set-env-vars=BQ_DATASET=world-genre-natt.world_genre,DATA_DIR=gs://world_genre_bucket,PUBLISH_DIR=gs://world_genre_bucket/published
+
+# Smoke test: this stage is idempotent and touches nothing else.
+gcloud run jobs execute world-genre-pipeline --region=asia-southeast3 `
+  --args=-m,scripts.run_init_bq --wait
+```
+
+**Then test one extractor from the job before building anything on top of it.**
+It runs from a datacentre IP rather than a home connection; MusicBrainz
+throttles those harder and scrapers sometimes block cloud ranges outright. If
+`run_extract_kworb` fails there, the whole scheduling plan needs a different
+shape, and that is much cheaper to learn now than after the workflow and
+scheduler exist.
 
 ---
 

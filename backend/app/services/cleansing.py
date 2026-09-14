@@ -154,6 +154,29 @@ def normalize_artist_name(raw: str | None) -> str | None:
     return primary or None
 
 
+def match_key(raw: str | None) -> str | None:
+    """The join key for matching an artist name against a reference source.
+
+    normalize_artist_name() plus casefolding. It exists as its own function
+    because BOTH SIDES of a name match must be produced by identical code, and
+    "identical" is easy to lose when one side is a Python loader and the other
+    is a SQL join written six months later.
+
+    Casefold rather than lower(): it handles non-ASCII case pairs that lower()
+    leaves alone, which matters for a chart covering 75 countries.
+
+    NOTE the consequence for SQL. This cannot be reproduced in BigQuery -
+    FEATURE_SPLIT_RE drops trailing collaborators, which no LOWER(TRIM(...))
+    will do. So a warehouse join on names requires the key to be COMPUTED AT
+    LOAD TIME on both sides and stored, not derived in the query. Deriving one
+    side in SQL and the other here is how a join silently misses the rows where
+    the two rules disagree, and those rows are exactly the messy ones you built
+    the normaliser for.
+    """
+    primary = normalize_artist_name(raw)
+    return primary.casefold() if primary else None
+
+
 def merge_genre_signals(
     lastfm_tags_by_artist: dict[str, list[dict]],
     musicbrainz_genres_by_artist: dict[str, list[str]],

@@ -7,6 +7,12 @@ Cloud Run Jobs driven by Cloud Workflows - see pipeline-workflow.yaml at the
 repo root and DEPLOYMENT.md section "Scheduling". This DAG stays in the repo as
 the documented orchestration, and runs locally via docker-compose.
 
+The schedule here and the Cloud Scheduler cron in pipeline-workflow.yaml must
+agree. They disagreed once - this file said @weekly while the deployment plan
+said daily - which mattered because the data-quality thresholds in
+app/core/dq.py are calibrated against daily partitions. Cadence is an input to
+those checks, not a free-standing preference.
+
 Dependency order:
   kworb        -> no deps, writes data/raw/kworb/*.json
   lastfm       -> no deps, writes data/raw/lastfm/*.json
@@ -54,7 +60,26 @@ from airflow.exceptions import AirflowException, AirflowFailException
 
 @dag(
     dag_id="genre_pipeline",
-    schedule="@weekly",              # or a cron string, e.g. "0 3 * * 1"
+    # Daily, not weekly, and the cadence is not an independent knob:
+    #
+    #  - kworb publishes daily, so a weekly run would serve data up to six
+    #    days stale on a site whose whole subject is what is charting now.
+    #  - chart_volume takes the median of the trailing 7 days and
+    #    countries_present compares against countries seen in that window.
+    #    At weekly cadence each window would hold exactly ONE prior partition,
+    #    so the "median" would be a single observation - the failure mode the
+    #    thresholds were specifically calibrated to avoid.
+    #  - every threshold in app/core/dq.py came from four consecutive DAILY
+    #    partitions. chart_churn's 0.820-0.873 is day-over-day turnover;
+    #    week-over-week would run much higher and the floor would be wrong.
+    #  - the artists dimension fills in across runs at ~1 MusicBrainz req/sec,
+    #    so daily fills it roughly seven times faster.
+    #
+    # 03:00 UTC is a starting guess, not a researched one: it needs checking
+    # against when kworb actually refreshes. Running before the source updates
+    # would reload yesterday's page - which chart_churn would correctly catch,
+    # since that is exactly the staleness it exists to detect.
+    schedule="0 3 * * *",
     start_date=pendulum.datetime(2026, 1, 1, tz="UTC"),
     catchup=False,
     tags=["genre-pipeline"],
@@ -192,7 +217,13 @@ def genre_pipeline():
         Runs AFTER load because its worklist is the artists load just wrote,
         and it's bounded to a fixed number of lookups per run - MusicBrainz's
         ~1 req/sec limit makes resolving every charting artist a multi-hour
-        job, so the dimension fills in across successive weekly runs instead.
+        job, so the dimension fills in across successive daily runs instead.
+
+        This is the incremental-backfill shape: rather than one long job that
+        must complete, a bounded slice per run that converges. The trade-off
+        is that coverage is a moving target for the first stretch, which is
+        why artist_genre_coverage measures the population we fetched tags for
+        rather than everything that charted.
         """
         from scripts.run_extract_artist_meta import main
         main()
