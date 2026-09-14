@@ -36,9 +36,18 @@ USING (
     -- several artists with no single primary claimant are absent by
     -- construction - that is tier 3, expressed as an omission rather than a
     -- branch.
+    --
+    -- The output column is `chosen_mbid`, NOT `mbid`, and that is not cosmetic.
+    -- Naming it `mbid` made this statement fail with "Aggregations of
+    -- aggregations are not allowed": BigQuery resolves names in HAVING against
+    -- the SELECT-list aliases BEFORE the table's own columns, so
+    -- COUNT(DISTINCT mbid) bound to the ARRAY_AGG expression above rather than
+    -- to the column being aggregated. An output column that shadows an input
+    -- column is legal, parses cleanly, and means something different in HAVING
+    -- than it does in WHERE.
     SELECT
       match_name,
-      ARRAY_AGG(mbid ORDER BY is_primary DESC LIMIT 1)[OFFSET(0)] AS mbid
+      ARRAY_AGG(mbid ORDER BY is_primary DESC LIMIT 1)[OFFSET(0)] AS chosen_mbid
     FROM `{dataset}.mb_artist_names`
     GROUP BY match_name
     HAVING COUNT(DISTINCT mbid) = 1 OR COUNTIF(is_primary) = 1
@@ -62,13 +71,13 @@ USING (
     -- two tiers are disjoint and no artist can appear twice.
     SELECT
       a.artist_name,
-      u.mbid,
+      u.chosen_mbid AS mbid,
       m.country,
       m.formed_year,
       'mb_dump_name' AS resolved_by
     FROM `{dataset}.artists` a
     JOIN unique_names u ON u.match_name = a.match_name
-    JOIN `{dataset}.mb_artists` m ON m.mbid = u.mbid
+    JOIN `{dataset}.mb_artists` m ON m.mbid = u.chosen_mbid
     WHERE a.resolved_at IS NULL
       AND a.mbid IS NULL
       AND a.match_name IS NOT NULL

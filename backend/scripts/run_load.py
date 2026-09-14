@@ -295,11 +295,51 @@ def artist_rows(names: set[str]) -> list[dict]:
     join misses precisely the rows the normaliser was written for.
 
     It is in `update_columns` rather than `fill_columns` because it is derived
-    purely from artist_name: recomputing it every run is free, and means a
-    change to match_key heals the whole table on the next load instead of
-    applying only to new artists.
+    purely from artist_name: recomputing it every run is free. Note this covers
+    only the names on TODAY's charts - backfill_match_names below is what keeps
+    the rest of the dimension in step.
     """
     return [{"artist_name": name, "match_name": match_key(name)} for name in sorted(names)]
+
+
+def backfill_match_names() -> list[dict]:
+    """`match_name` for every artist in the dimension, not just today's chart.
+
+    WHY THIS EXISTS. artist_rows above only sees the ~2,900 names on today's
+    charts, while `artists` holds every name ever charted - 4,356 of them. The
+    first real run of the MusicBrainz join found 742 of 1,307 unresolved
+    artists carrying no match_name at all: 57% of the backlog was ineligible
+    for name matching, not because the mirror lacked those artists but because
+    nobody had computed their key. An artist who charted last month and hasn't
+    since would have waited for a chance re-entry to become resolvable.
+
+    That is the general shape of the bug, and it is worth recognising away from
+    this codebase: a derived column maintained only on the rows a job happens
+    to touch drifts out of step with the rows it does not, and the drift hides
+    because the column IS populated - just not everywhere. Backfilling makes
+    the column a function of the table rather than of the day's input.
+
+    RECOMPUTED, not filled-where-null, deliberately. Filling only nulls would
+    be cheaper and would still have fixed the 742, but it would freeze every
+    existing key at whatever match_key produced when that row was first seen.
+    The normaliser is still changing; recomputing is what makes an improvement
+    to it heal the whole table on the next run.
+
+    The cost is one read of the dimension per run - trivial at 4k rows, and it
+    scales with the dimension rather than with the day's chart. At a few
+    million artists this would want to be an incremental UPDATE, which is only
+    possible if the key is expressible in SQL. match_key is not, so the honest
+    answer at that scale is a UDF or a separate scheduled recompute, not a
+    nightly full pass.
+    """
+    from app.core.bq import dataset_id, run_query
+
+    rows = run_query(f"SELECT artist_name FROM `{dataset_id()}.artists`")
+    return [
+        {"artist_name": row["artist_name"], "match_name": match_key(row["artist_name"])}
+        for row in rows
+        if row["artist_name"]
+    ]
 
 
 def _dedupe(rows: list[dict], key: tuple[str, ...]) -> list[dict]:
@@ -401,6 +441,13 @@ def main() -> None:
     merge_dimension(
         "artists", "artist_name", artist_rows(names), update_columns=["match_name"]
     )
+    # AFTER the merge above, not before: that one inserts today's new artists,
+    # and reading the dimension first would miss them for a whole day.
+    backfilled = backfill_match_names()
+    merge_dimension(
+        "artists", "artist_name", backfilled, update_columns=["match_name"]
+    )
+    logger.info("match_name recomputed for %d artists in the dimension.", len(backfilled))
     # Free MusicBrainz ids, filled only where the dimension has none. See
     # lastfm_mbid_rows for why this is fill and not update.
     mbids = lastfm_mbid_rows()
