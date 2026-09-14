@@ -194,3 +194,39 @@ CREATE TABLE IF NOT EXISTS `{dataset}.chart_entries` (
 )
 PARTITION BY snapshot_date
 CLUSTER BY country_code, artist_name;
+
+-- Data-quality check results, one row per check per attempt. Written by
+-- scripts/run_validate.py; see app/core/dq.py for what the checks assert.
+--
+-- The one fact table here that is APPENDED rather than partition-replaced.
+-- Every other table answers "what is true for this day", so rewriting the day
+-- is correct. This one answers "what happened on each attempt", and a rerun
+-- that passes must not erase the attempt that failed - the failures are the
+-- part worth keeping, both for debugging and because a threshold guessed from
+-- a single observation only becomes a real threshold once there is a range to
+-- look at.
+--
+-- It is also what makes freshness monitorable: MAX(run_ts) answers "is the
+-- pipeline still running", which a healthy-looking API serving stale JSON
+-- cannot tell anyone.
+CREATE TABLE IF NOT EXISTS `{dataset}.dq_runs` (
+    run_ts TIMESTAMP NOT NULL,
+    snapshot_date DATE NOT NULL,
+    check_name STRING NOT NULL,
+    -- pass, warn or fail.
+    status STRING NOT NULL,
+    -- Nullable: a check that could not run has no value, and recording 0 would
+    -- be indistinguishable from a check that genuinely measured zero.
+    value FLOAT64,
+    threshold FLOAT64,
+    -- Stored per row rather than read from the code at query time, so history
+    -- stays readable after a check is promoted from advisory to blocking.
+    blocking BOOL,
+    -- Supporting numbers as a JSON string - the raw counts behind a ratio.
+    -- STRING rather than BigQuery's JSON type: nothing queries inside it yet,
+    -- and a string needs no special handling on the JSON load path.
+    context STRING,
+    PRIMARY KEY (snapshot_date, run_ts, check_name) NOT ENFORCED
+)
+PARTITION BY snapshot_date
+CLUSTER BY check_name;

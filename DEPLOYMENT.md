@@ -122,13 +122,95 @@ $env:BQ_DATASET = "world-genre-natt.world_genre"
 ..\.venv\Scripts\python.exe -m scripts.run_init_bq
 ```
 
-Nine tables, all `CREATE TABLE IF NOT EXISTS`, so this is safe on every run.
+Ten tables, all `CREATE TABLE IF NOT EXISTS`, so this is safe on every run.
 Fact tables partition on `snapshot_date` and cluster on `country_code` —
 partition pruning is what keeps reads cheap, since BigQuery bills on bytes
 scanned.
 
 Dataset names allow only letters, numbers and underscores. The format is
 `project:dataset` — project on the left.
+
+> `dq_runs` was added after the original nine. Re-run `scripts.run_init_bq`
+> against an existing dataset to create it; nothing else is affected.
+
+---
+
+## Data-quality gate
+
+The pipeline runs in this order, and `run_validate` is not optional:
+
+```powershell
+cd backend
+$env:BQ_DATASET = "world-genre-natt.world_genre"
+..\.venv\Scripts\python.exe -m scripts.run_cleanse
+..\.venv\Scripts\python.exe -m scripts.run_load
+..\.venv\Scripts\python.exe -m scripts.run_validate
+..\.venv\Scripts\python.exe -m scripts.run_publish
+```
+
+`run_validate` exits non-zero when a blocking check fails, which is what stops
+the chain before `run_publish`. Because the API serves static JSON rather than
+querying BigQuery, a publish that doesn't happen leaves the previous run's good
+data in place — bad data can land in the warehouse without ever being served.
+That ordering is the **write-audit-publish** pattern, and it is the reason the
+gate sits between load and publish rather than at the end.
+
+Five checks, defined in `backend/app/core/dq.py`, each one a query in
+`backend/sql/bigquery/checks/` returning a single `value`. Every threshold was
+set from four consecutive real partitions (2026-09-10 to 09-13), and the
+observed range is recorded in each check's description:
+
+| Check | Asserts | Observed | Threshold |
+| --- | --- | --- | --- |
+| `chart_volume` | Rows loaded vs trailing 7-day median | 0.9997–1.001 | ≥ 0.95 (warn 0.98) |
+| `countries_present` | Countries that charted this week and are missing today | 0 | = 0 |
+| `chart_churn` | Chart slots changed since the previous snapshot | 0.820–0.873 | ≥ 0.30 (warn 0.60) |
+| `duplicate_chart_positions` | Repeated `(country, position)` keys | 0 of 7,315 | = 0 |
+| `artist_genre_coverage` | Tagged artists that got a genre | 0.948 | ≥ 0.85 (warn 0.92) |
+
+`countries_present` exists because `chart_volume` provably cannot do its job:
+one country out of 75 is ~1.3% of rows, inside the noise of a row-count ratio.
+It compares against the trailing week rather than `seeds/countries.csv`,
+because Andorra is in the seed list and has never charted — a seed-list
+comparison would fail every run and be switched off within a week.
+
+`artist_genre_coverage` divides by `country_artist_listeners`, **not**
+`chart_entries`. Genre signal comes from the Last.fm per-country top list, and
+`schema.sql` is explicit that Last.fm and the Spotify chart are different
+populations. An earlier version divided by charting artists, read 0.157, and
+blocked a publish over a regression that did not exist.
+
+Five statuses, not three: `pass`, `warn`, `fail`, `error` (the check could not
+execute — blocking, but a credentials problem rather than a data one) and
+`skip` (nothing to measure). A check declares it may abstain by returning a
+`sample_size` column; zero means skip. Exactly one check — `chart_volume` —
+declares no `sample_size` and always renders a verdict, so an empty partition
+produces one accurate failure and four honest abstentions rather than three
+vacuous passes. That rule is enforced by a test.
+
+Results append to `dq_runs` on every attempt, whatever the outcome — the
+failures are the part worth keeping, and `MAX(run_ts)` there is the freshness
+signal that `/api/health` cannot give (a healthy API serving month-old JSON
+looks fine).
+
+**Not yet gated: the unclassified genre-tag rate.** `merge_genre_signals`
+counts it, but drops `other`-bucket tags before scoring, so
+`country_genre_scores` can never contain them and no warehouse query can see
+the number. It lives only in `data/processed/_quality_report.json`. Landing
+that report in BigQuery is the outstanding piece of work here.
+
+Useful flags:
+
+```powershell
+..\.venv\Scripts\python.exe -m scripts.run_validate --date 2026-09-13
+..\.venv\Scripts\python.exe -m scripts.run_validate --no-record
+..\.venv\Scripts\python.exe -m scripts.run_validate --fail-on-warn
+```
+
+New checks should land with `blocking=False`, accumulate a few weeks of range
+in `dq_runs`, and be promoted once their normal band is known. A threshold set
+from one observation fires on ordinary variance, and a gate that cries wolf
+gets bypassed within a week.
 
 ---
 
@@ -422,6 +504,10 @@ The pipeline currently runs on demand. To automate it, each stage becomes a
 Cloud Run **Job** — not a Service, because jobs run to completion and allow long
 timeouts, and the MusicBrainz stage alone runs 33 minutes cold. Cloud Scheduler
 triggers the chain daily. Cost is effectively zero.
+
+`run_validate` is a stage in that chain, between load and publish, and its exit
+code is what the chain must branch on — an unattended daily run is precisely
+the case the gate exists for, since nobody is watching the log at 3am.
 
 This needs a pipeline image, which doesn't exist yet — `Dockerfile.api` builds
 the API, and the Airflow image isn't the right shape for a job.
