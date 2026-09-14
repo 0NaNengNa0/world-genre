@@ -230,3 +230,36 @@ CREATE TABLE IF NOT EXISTS `{dataset}.dq_runs` (
 )
 PARTITION BY snapshot_date
 CLUSTER BY check_name;
+
+-- Per-country cleanse statistics, from run_cleanse's quality report. Loaded by
+-- scripts/run_load.py; asserted on by the unclassified_tag_rate check.
+--
+-- This table exists because the pipeline's headline quality metric was being
+-- computed and then discarded. cleansing.merge_genre_signals counts raw tags
+-- it could not classify - tags that normalized to nothing, or fell through
+-- genre_buckets.bucket_genre to the "other" bucket - but `other` is dropped
+-- BEFORE scoring, so those tags never reach country_genre_scores and no query
+-- against the warehouse could see the rate at all. It lived in one local JSON
+-- file that every cleanse run overwrote.
+--
+-- Consequence worth remembering: there was no history to backfill from when
+-- this table was added. A metric kept outside the warehouse cannot be trended
+-- later, only from now on.
+CREATE TABLE IF NOT EXISTS `{dataset}.cleanse_quality` (
+    country_code STRING NOT NULL,
+    snapshot_date DATE NOT NULL,
+    artist_count INT64,
+    total_genre_tags INT64,
+    unclassified_genre_tags INT64,
+    -- Stored alongside its own numerator and denominator, and recomputed at
+    -- load time rather than copied from the report's rounded value, so the
+    -- three always agree.
+    -- NULL, not 0, when a country produced no tags at all: "no tags to
+    -- classify" is a different fact from "classified all of them".
+    unclassified_rate FLOAT64,
+    distinct_genres INT64,
+    PRIMARY KEY (country_code, snapshot_date) NOT ENFORCED,
+    FOREIGN KEY (country_code) REFERENCES `{dataset}.countries` (code) NOT ENFORCED
+)
+PARTITION BY snapshot_date
+CLUSTER BY country_code;

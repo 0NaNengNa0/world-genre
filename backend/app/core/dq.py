@@ -356,4 +356,25 @@ CHECKS: list[Check] = [
         threshold=0.85,
         warn_threshold=0.92,
     ),
+    Check(
+        name="unclassified_tag_rate",
+        description=(
+            "Share of raw genre tags cleansing could not classify, weighted by "
+            "tag volume. Reads cleanse_quality, because the unclassified tags "
+            "are dropped before scoring and are by construction absent from "
+            "every other table. A rise means the tag vocabulary has moved "
+            "underneath the bucket list - a slow decay in every genre donut, "
+            "invisible to every other check here. "
+            "NON-BLOCKING, and this is the point of the flag rather than an "
+            "excuse: the ~0.18 figure quoted from run_cleanse's report is an "
+            "average of per-country rates, while this is volume-weighted, so "
+            "they are not the same statistic and no observation of THIS number "
+            "exists yet. It also cannot be backfilled - the report kept only "
+            "'latest'. Let dq_runs accumulate a fortnight, then promote it."
+        ),
+        comparison="max",
+        threshold=0.35,
+        warn_threshold=0.25,
+        blocking=False,
+    ),
 ]

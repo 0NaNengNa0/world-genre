@@ -36,6 +36,7 @@ PROCESSED_DIR = DATA_DIR / "processed"
 KWORB_DIR = DATA_DIR / "raw" / "kworb"
 LASTFM_DIR = DATA_DIR / "raw" / "lastfm"
 DEEZER_ARTISTS_PATH = DATA_DIR / "raw" / "deezer" / "artists.json"
+QUALITY_REPORT_PATH = PROCESSED_DIR / "_quality_report.json"
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger("run_load")
@@ -199,6 +200,63 @@ def deezer_fan_rows() -> list[dict]:
     ]
 
 
+def quality_rows(countries: dict, snapshot_date: date) -> list[dict]:
+    """Per-country cleanse statistics, from run_cleanse's quality report.
+
+    Pure, like country_rows: takes the report's `countries` mapping, returns
+    row dicts. No file, no client.
+
+    This exists because the most useful data-quality metric in the pipeline
+    was being computed and then thrown away. cleansing.merge_genre_signals
+    counts how many raw tags it could not classify - tags that normalized to
+    nothing, or fell through genre_buckets.bucket_genre to the "other" bucket
+    - and run_cleanse writes those counts to a local JSON file. But `other` is
+    dropped BEFORE scoring, so it never reaches country_genre_scores, and no
+    query against the warehouse can see the number at all. A data-quality gate
+    could not assert on the pipeline's own headline quality metric.
+
+    Loading it here fixes three things at once: the rate becomes gateable (see
+    the unclassified_tag_rate check), it gains history so a threshold can be
+    set from a range rather than a guess, and it stops being a file that the
+    next cleanse run overwrites. The report keeps only "latest" - there is no
+    history on disk to backfill from, which is exactly the cost of leaving a
+    metric outside the warehouse.
+    """
+    day = _iso(snapshot_date)
+    rows = []
+    for code, stats in sorted(countries.items()):
+        total = stats.get("total_genre_tags", 0) or 0
+        unclassified = stats.get("unclassified_genre_tags", 0) or 0
+        rows.append(
+            {
+                "country_code": code,
+                "snapshot_date": day,
+                "artist_count": stats.get("artist_count", 0),
+                "total_genre_tags": total,
+                "unclassified_genre_tags": unclassified,
+                # Recomputed rather than copied from the report. The report's
+                # value is rounded to 4dp for human reading, and a rate stored
+                # beside its own numerator and denominator should agree with
+                # them exactly - otherwise a later query gets two answers.
+                "unclassified_rate": (unclassified / total) if total else None,
+                "distinct_genres": stats.get("distinct_genres", 0),
+            }
+        )
+    return rows
+
+
+def _load_quality_report() -> dict:
+    """The `countries` section of run_cleanse's report, or empty if absent.
+
+    Empty rather than an error: run_load has always been runnable against raw
+    files alone, and a missing report should cost the quality check its
+    numbers (it abstains) rather than the whole load.
+    """
+    if not QUALITY_REPORT_PATH.exists():
+        return {}
+    return json.loads(QUALITY_REPORT_PATH.read_text()).get("countries", {})
+
+
 def _dedupe(rows: list[dict], key: tuple[str, ...]) -> list[dict]:
     """Last write wins on a repeated key.
 
@@ -225,6 +283,7 @@ def main() -> None:
         "genres": [],
         "chart_entries": [],
         "country_artist_listeners": [],
+        "cleanse_quality": [],
     }
     loaded, skipped = 0, []
 
@@ -253,6 +312,11 @@ def main() -> None:
     names = {r["artist_name"] for r in collected["chart_entries"]}
     names |= {r["artist_name"] for r in collected["country_artist_listeners"]}
 
+    # Whole-run rather than per-country, because run_cleanse writes one report
+    # for the whole pass. Partitioned and replaced like any other fact, so a
+    # rerun of the same day overwrites rather than doubling the tag counts.
+    collected["cleanse_quality"] = quality_rows(_load_quality_report(), today)
+
     facts = {
         "country_snapshots": ("country_code", "snapshot_date"),
         "country_genre_scores": ("country_code", "genre", "snapshot_date"),
@@ -269,6 +333,7 @@ def main() -> None:
             "artist_name",
             "snapshot_date",
         ),
+        "cleanse_quality": ("country_code", "snapshot_date"),
     }
     for table, key in facts.items():
         rows = _dedupe(collected[table], key)
@@ -298,7 +363,7 @@ def main() -> None:
 
     logger.info(
         "Done. %d/%d countries%s. %d chart entries, %d listener rows, "
-        "%d artists, %d with Deezer fans.",
+        "%d artists, %d with Deezer fans, %d quality rows.",
         loaded,
         len(COUNTRIES),
         f" ({len(skipped)} skipped)" if skipped else "",
@@ -306,7 +371,16 @@ def main() -> None:
         len(collected["country_artist_listeners"]),
         len(names),
         len(fans),
+        len(collected["cleanse_quality"]),
     )
+    if not collected["cleanse_quality"]:
+        # Not fatal, but the unclassified_tag_rate check will abstain without
+        # it, and a check that abstains every run is indistinguishable from a
+        # check nobody wrote.
+        logger.warning(
+            "No quality report at %s - run run_cleanse to produce one.",
+            QUALITY_REPORT_PATH,
+        )
 
 
 if __name__ == "__main__":

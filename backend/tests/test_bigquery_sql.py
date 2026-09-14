@@ -98,7 +98,7 @@ class TestSchema:
         from scripts.run_init_bq import statements
 
         parsed = statements(SCHEMA.read_text(encoding="utf-8"), "proj.world_genre")
-        assert len(parsed) == 10
+        assert len(parsed) == 11
         for statement in parsed:
             sqlglot.parse_one(statement, dialect="bigquery")
 

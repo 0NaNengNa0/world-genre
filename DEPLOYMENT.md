@@ -122,7 +122,7 @@ $env:BQ_DATASET = "world-genre-natt.world_genre"
 ..\.venv\Scripts\python.exe -m scripts.run_init_bq
 ```
 
-Ten tables, all `CREATE TABLE IF NOT EXISTS`, so this is safe on every run.
+Eleven tables, all `CREATE TABLE IF NOT EXISTS`, so this is safe on every run.
 Fact tables partition on `snapshot_date` and cluster on `country_code` —
 partition pruning is what keeps reads cheap, since BigQuery bills on bytes
 scanned.
@@ -130,8 +130,9 @@ scanned.
 Dataset names allow only letters, numbers and underscores. The format is
 `project:dataset` — project on the left.
 
-> `dq_runs` was added after the original nine. Re-run `scripts.run_init_bq`
-> against an existing dataset to create it; nothing else is affected.
+> `dq_runs` and `cleanse_quality` were added after the original nine. Re-run
+> `scripts.run_init_bq` against an existing dataset to create them; nothing
+> else is affected.
 
 ---
 
@@ -155,10 +156,10 @@ data in place — bad data can land in the warehouse without ever being served.
 That ordering is the **write-audit-publish** pattern, and it is the reason the
 gate sits between load and publish rather than at the end.
 
-Five checks, defined in `backend/app/core/dq.py`, each one a query in
-`backend/sql/bigquery/checks/` returning a single `value`. Every threshold was
-set from four consecutive real partitions (2026-09-10 to 09-13), and the
-observed range is recorded in each check's description:
+Six checks, defined in `backend/app/core/dq.py`, each one a query in
+`backend/sql/bigquery/checks/` returning a single `value`. Every threshold on a
+blocking check was set from four consecutive real partitions (2026-09-10 to
+09-13), and the observed range is recorded in each check's description:
 
 | Check | Asserts | Observed | Threshold |
 | --- | --- | --- | --- |
@@ -167,6 +168,7 @@ observed range is recorded in each check's description:
 | `chart_churn` | Chart slots changed since the previous snapshot | 0.820–0.873 | ≥ 0.30 (warn 0.60) |
 | `duplicate_chart_positions` | Repeated `(country, position)` keys | 0 of 7,315 | = 0 |
 | `artist_genre_coverage` | Tagged artists that got a genre | 0.948 | ≥ 0.85 (warn 0.92) |
+| `unclassified_tag_rate` | Genre tags cleansing could not classify | none yet | ≤ 0.35, **advisory** |
 
 `countries_present` exists because `chart_volume` provably cannot do its job:
 one country out of 75 is ~1.3% of rows, inside the noise of a row-count ratio.
@@ -193,11 +195,33 @@ failures are the part worth keeping, and `MAX(run_ts)` there is the freshness
 signal that `/api/health` cannot give (a healthy API serving month-old JSON
 looks fine).
 
-**Not yet gated: the unclassified genre-tag rate.** `merge_genre_signals`
-counts it, but drops `other`-bucket tags before scoring, so
-`country_genre_scores` can never contain them and no warehouse query can see
-the number. It lives only in `data/processed/_quality_report.json`. Landing
-that report in BigQuery is the outstanding piece of work here.
+`unclassified_tag_rate` reads `cleanse_quality`, a table fed by `run_load` from
+`data/processed/_quality_report.json`. It has to: `merge_genre_signals` counts
+unclassified tags and then drops the `other` bucket **before** scoring, so
+those tags are by construction absent from `country_genre_scores` and from
+every other table in the warehouse. Until that report was loaded, the
+pipeline's headline quality metric could not be asserted on at all.
+
+It ships **advisory** (`blocking=False`) and should stay that way for a
+fortnight. The ~18% quoted from `run_cleanse`'s report is an average of
+per-country rates; this check is weighted by tag volume, so they are different
+statistics and no observation of *this* number exists yet. It also could not be
+backfilled — the report only ever kept "latest", which is the standing cost of
+leaving a metric outside the warehouse. Promote it once `dq_runs` shows a real
+range:
+
+```powershell
+$q = @'
+SELECT MIN(value) AS lo, MAX(value) AS hi, COUNT(*) AS runs
+FROM `world-genre-natt.world_genre.dq_runs`
+WHERE check_name = 'unclassified_tag_rate' AND status != 'skip'
+'@
+bq query --use_legacy_sql=false ($q -replace "\r?\n", " ")
+```
+
+Note `bq` on Windows reads only the first line of a multi-line argument, hence
+the `-replace`. Without it you get `Syntax error: Unexpected end of script`,
+which points at the SQL rather than at the truncation.
 
 Useful flags:
 
