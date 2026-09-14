@@ -377,4 +377,22 @@ CHECKS: list[Check] = [
         warn_threshold=0.25,
         blocking=False,
     ),
+    Check(
+        name="charting_artists_unresolved",
+        description=(
+            "Share of today's charting artists that nobody has managed to look "
+            "up. Exists because this is the number that drifted for weeks with "
+            "nothing watching it: the enrichment backlog was 1,591 on 09-13 and "
+            "1,602 after two full runs on 09-14, because new charting artists "
+            "arrive about as fast as a ~1 req/sec API stage clears them. "
+            "NON-BLOCKING and widely bounded, because no observation of THIS "
+            "metric exists yet - the per-day share is a different statistic "
+            "from the absolute backlog. Let dq_runs accumulate a fortnight, "
+            "then tighten it to just above the settled range."
+        ),
+        comparison="max",
+        threshold=0.90,
+        warn_threshold=0.70,
+        blocking=False,
+    ),
 ]

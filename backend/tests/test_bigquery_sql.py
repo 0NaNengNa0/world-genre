@@ -12,7 +12,6 @@ than in a Cloud Run job at 6am.
 import re
 
 import pytest
-
 from app.core.config import SQL_DIR
 
 sqlglot = pytest.importorskip("sqlglot")
@@ -20,12 +19,13 @@ sqlglot = pytest.importorskip("sqlglot")
 SCHEMA = SQL_DIR / "bigquery" / "schema.sql"
 QUERIES = sorted((SQL_DIR / "bigquery" / "queries").glob("*.sql"))
 CHECKS = sorted((SQL_DIR / "bigquery" / "checks").glob("*.sql"))
+MERGES = sorted((SQL_DIR / "bigquery" / "merges").glob("*.sql"))
 
 # The data-quality checks get the identical treatment, deliberately. They are
 # the stage that decides whether a run may publish, so a check that fails to
 # parse would fail closed and block every publish - the dialect guard matters
 # more here than for a read query, not less.
-SQL_FILES = QUERIES + CHECKS
+SQL_FILES = QUERIES + CHECKS + MERGES
 
 # Stand-ins for the values substituted at runtime, so the file parses as it
 # will actually be sent.
@@ -98,7 +98,7 @@ class TestSchema:
         from scripts.run_init_bq import statements
 
         parsed = statements(SCHEMA.read_text(encoding="utf-8"), "proj.world_genre")
-        assert len(parsed) == 13
+        assert len(parsed) == 15
         for statement in parsed:
             sqlglot.parse_one(statement, dialect="bigquery")
 

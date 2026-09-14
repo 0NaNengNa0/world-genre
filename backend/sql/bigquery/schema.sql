@@ -316,3 +316,30 @@ CREATE TABLE IF NOT EXISTS `{dataset}.mb_artist_names` (
     FOREIGN KEY (mbid) REFERENCES `{dataset}.mb_artists` (mbid) NOT ENFORCED
 )
 CLUSTER BY match_name;
+
+-- COLUMNS ADDED TO EXISTING TABLES.
+--
+-- `CREATE TABLE IF NOT EXISTS` is a no-op once the table exists, so it cannot
+-- add a column to a dataset that has already been created. Editing the CREATE
+-- above would work on a fresh clone and silently do nothing in production -
+-- which is the worse of the two outcomes, because the code would then write to
+-- a column that exists locally and not in the warehouse.
+--
+-- ALTER TABLE ... ADD COLUMN IF NOT EXISTS is idempotent in the same way the
+-- CREATEs are, so run_init_bq can keep running the whole file every night.
+-- New columns belong here rather than in the table definition above.
+
+-- The join key for matching an artist against a reference source, written at
+-- load time by cleansing.match_key. It is stored rather than derived in the
+-- query because the key cannot be reproduced in SQL: it drops trailing
+-- collaborators, which no LOWER(TRIM(...)) will do. Both sides of the join
+-- must be produced by identical Python, or the join silently misses exactly
+-- the messy rows the normaliser exists for.
+ALTER TABLE `{dataset}.artists` ADD COLUMN IF NOT EXISTS match_name STRING;
+
+-- Provenance: which path established this artist's origin. 'mb_dump' for the
+-- warehouse join against the MusicBrainz mirror, 'api' for the rate-limited
+-- per-artist lookup. Worth carrying because the two have different cost and
+-- different failure modes, and "where did this value come from" is otherwise
+-- unanswerable after the fact.
+ALTER TABLE `{dataset}.artists` ADD COLUMN IF NOT EXISTS resolved_by STRING;

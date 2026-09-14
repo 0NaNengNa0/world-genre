@@ -12,7 +12,6 @@ existed only inside a container image. The order test below is what stops it
 drifting away from what has actually been running.
 """
 import pytest
-
 from scripts import run_pipeline
 from scripts.run_pipeline import STAGES, Stage, select_stages
 
@@ -28,6 +27,7 @@ class TestStageList:
             "extract_wikidata",
             "cleanse",
             "load",
+            "resolve_artists",
             "enrich_artists",
             "enrich_genres",
             "validate",

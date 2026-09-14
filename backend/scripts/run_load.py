@@ -30,6 +30,7 @@ from datetime import date, datetime, timezone
 
 from app.core.bq_load import merge_dimension, replace_partition
 from app.core.config import COUNTRIES, DATA_DIR
+from app.services.cleansing import match_key
 from app.services.extractors.kworb import parse_chart_rows
 
 PROCESSED_DIR = DATA_DIR / "processed"
@@ -257,6 +258,50 @@ def _load_quality_report() -> dict:
     return json.loads(QUALITY_REPORT_PATH.read_text()).get("countries", {})
 
 
+def lastfm_mbid_rows() -> list[dict]:
+    """MusicBrainz ids that Last.fm already handed us, keyed by artist name.
+
+    `geo.gettopartists` returns an mbid alongside the name and listener count,
+    and until now this loader kept the first two and dropped the third. The
+    only way an mbid ever reached the warehouse was the rate-limited search in
+    run_extract_artist_meta, which resolves on the order of fifty artists a
+    night - while the identifier was arriving free, daily, for every Last.fm
+    artist and being discarded on the way in.
+
+    Merged with `fill_columns`, never `update_columns`: Last.fm's id is
+    convenient, the enrichment stage's is deliberate, and a free value must
+    never overwrite a verified one.
+    """
+    rows = []
+    for country in COUNTRIES:
+        path = LASTFM_DIR / f"{country['kworb_code']}.json"
+        if not path.exists():
+            continue
+        for artist in json.loads(path.read_text()).get("artists", []):
+            name, mbid = artist.get("name"), artist.get("mbid")
+            # Last.fm returns an empty string rather than null for artists it
+            # has no id for, which is why this tests truthiness, not None.
+            if name and mbid:
+                rows.append({"artist_name": name, "mbid": mbid})
+    return _dedupe(rows, ("artist_name",))
+
+
+def artist_rows(names: set[str]) -> list[dict]:
+    """The artists dimension's own rows: the name, and its join key.
+
+    `match_name` is computed here, at load time, because cleansing.match_key
+    cannot be reproduced in SQL - it drops trailing collaborators. Both sides
+    of the MusicBrainz join have to be normalised by identical Python or the
+    join misses precisely the rows the normaliser was written for.
+
+    It is in `update_columns` rather than `fill_columns` because it is derived
+    purely from artist_name: recomputing it every run is free, and means a
+    change to match_key heals the whole table on the next load instead of
+    applying only to new artists.
+    """
+    return [{"artist_name": name, "match_name": match_key(name)} for name in sorted(names)]
+
+
 def _dedupe(rows: list[dict], key: tuple[str, ...]) -> list[dict]:
     """Last write wins on a repeated key.
 
@@ -354,8 +399,13 @@ def main() -> None:
         "genres", "genre", _dedupe(collected["genres"], ("genre",))
     )
     merge_dimension(
-        "artists", "artist_name", [{"artist_name": n} for n in sorted(names)]
+        "artists", "artist_name", artist_rows(names), update_columns=["match_name"]
     )
+    # Free MusicBrainz ids, filled only where the dimension has none. See
+    # lastfm_mbid_rows for why this is fill and not update.
+    mbids = lastfm_mbid_rows()
+    merge_dimension("artists", "artist_name", mbids, fill_columns=["mbid"])
+
     fans = deezer_fan_rows()
     merge_dimension(
         "artists", "artist_name", fans, update_columns=["deezer_fans"]
@@ -363,13 +413,14 @@ def main() -> None:
 
     logger.info(
         "Done. %d/%d countries%s. %d chart entries, %d listener rows, "
-        "%d artists, %d with Deezer fans, %d quality rows.",
+        "%d artists, %d with Last.fm mbids, %d with Deezer fans, %d quality rows.",
         loaded,
         len(COUNTRIES),
         f" ({len(skipped)} skipped)" if skipped else "",
         len(collected["chart_entries"]),
         len(collected["country_artist_listeners"]),
         len(names),
+        len(mbids),
         len(fans),
         len(collected["cleanse_quality"]),
     )

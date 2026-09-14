@@ -100,9 +100,13 @@ def replace_partition(table: str, snapshot_date, rows: list[dict]) -> int:
 
 
 def merge_dimension(
-    table: str, key: str, rows: list[dict], update_columns: list[str] | None = None
+    table: str,
+    key: str,
+    rows: list[dict],
+    update_columns: list[str] | None = None,
+    fill_columns: list[str] | None = None,
 ) -> int:
-    """Insert new keys, optionally updating named columns on existing ones.
+    """Insert new keys, optionally updating or filling columns on existing ones.
 
     `update_columns` is deliberately explicit rather than "all columns". The
     dimension tables are written by several scripts that each own different
@@ -110,7 +114,17 @@ def merge_dimension(
     artist names - blank out the origin_country and deezer_fans that the
     enrichment steps spent rate-limited API calls resolving.
 
-    Passing None means insert-only: existing rows are left entirely alone.
+    `fill_columns` is the weaker form - `T.c = COALESCE(T.c, S.c)`, writing
+    only where the target is still NULL. It exists for the case where two
+    sources supply the same field with different authority. Last.fm hands out
+    MusicBrainz ids for free in its top-artists response, while the enrichment
+    stage establishes them by an explicit lookup; the free one is worth taking
+    when nothing is there and must never overwrite the deliberate one. An
+    unconditional update would silently replace a verified id with a
+    convenient one, and nothing downstream could tell the difference.
+
+    Both may be given; the assignments are combined. Passing neither means
+    insert-only: existing rows are left entirely alone.
     """
     if not rows:
         return 0
@@ -136,10 +150,11 @@ def merge_dimension(
     insert_cols = ", ".join(columns)
     insert_vals = ", ".join(f"S.{c}" for c in columns)
 
-    update_clause = ""
-    if update_columns:
-        assignments = ", ".join(f"T.{c} = S.{c}" for c in update_columns)
-        update_clause = f"WHEN MATCHED THEN UPDATE SET {assignments}"
+    assignments = [f"T.{c} = S.{c}" for c in (update_columns or [])]
+    assignments += [f"T.{c} = COALESCE(T.{c}, S.{c})" for c in (fill_columns or [])]
+    update_clause = (
+        f"WHEN MATCHED THEN UPDATE SET {', '.join(assignments)}" if assignments else ""
+    )
 
     run_statement(
         f"""

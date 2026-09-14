@@ -82,6 +82,11 @@ STAGES: list[Stage] = [
     Stage("extract_wikidata", "scripts.run_extract_wikidata"),
     Stage("cleanse", "scripts.run_cleanse"),
     Stage("load", "scripts.run_load"),
+    # Warehouse-side resolution against the MusicBrainz mirror, before the API
+    # stage rather than instead of it. Everything this resolves is an artist
+    # enrich_artists never has to spend a rate-limited request on, so its
+    # position here - after load, before enrichment - is the whole saving.
+    Stage("resolve_artists", "scripts.run_resolve_artists"),
     # The long pole: ~22 minutes of the ~36 minute run, and it resolves only
     # tens of artists per night because MusicBrainz rate-limits per IP and
     # serverless egress shares its addresses. See DEPLOYMENT.md.

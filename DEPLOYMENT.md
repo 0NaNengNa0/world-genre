@@ -122,7 +122,12 @@ $env:BQ_DATASET = "world-genre-natt.world_genre"
 ..\.venv\Scripts\python.exe -m scripts.run_init_bq
 ```
 
-Eleven tables, all `CREATE TABLE IF NOT EXISTS`, so this is safe on every run.
+Thirteen tables, all `CREATE TABLE IF NOT EXISTS`, plus `ALTER TABLE ... ADD
+COLUMN IF NOT EXISTS` statements for columns added to tables that already
+exist. Both forms are idempotent, so this is safe on every run — and the ALTERs
+are necessary because `CREATE TABLE IF NOT EXISTS` is a no-op on an existing
+table and would silently fail to add a column in production while working
+perfectly on a fresh clone.
 Fact tables partition on `snapshot_date` and cluster on `country_code` —
 partition pruning is what keeps reads cheap, since BigQuery bills on bytes
 scanned.
@@ -130,9 +135,10 @@ scanned.
 Dataset names allow only letters, numbers and underscores. The format is
 `project:dataset` — project on the left.
 
-> `dq_runs` and `cleanse_quality` were added after the original nine. Re-run
-> `scripts.run_init_bq` against an existing dataset to create them; nothing
-> else is affected.
+> `dq_runs`, `cleanse_quality`, `mb_artists` and `mb_artist_names` were all
+> added after the original nine, and `artists` gained `match_name` and
+> `resolved_by`. Re-run `scripts.run_init_bq` against an existing dataset to
+> apply all of it; nothing else is affected.
 
 ---
 
@@ -145,6 +151,7 @@ cd backend
 $env:BQ_DATASET = "world-genre-natt.world_genre"
 ..\.venv\Scripts\python.exe -m scripts.run_cleanse
 ..\.venv\Scripts\python.exe -m scripts.run_load
+..\.venv\Scripts\python.exe -m scripts.run_resolve_artists
 ..\.venv\Scripts\python.exe -m scripts.run_validate
 ..\.venv\Scripts\python.exe -m scripts.run_publish
 ```
@@ -168,7 +175,7 @@ data in place — bad data can land in the warehouse without ever being served.
 That ordering is the **write-audit-publish** pattern, and it is the reason the
 gate sits between load and publish rather than at the end.
 
-Six checks, defined in `backend/app/core/dq.py`, each one a query in
+Seven checks, defined in `backend/app/core/dq.py`, each one a query in
 `backend/sql/bigquery/checks/` returning a single `value`. Every threshold on a
 blocking check was set from four consecutive real partitions (2026-09-10 to
 09-13), and the observed range is recorded in each check's description:
@@ -181,6 +188,7 @@ blocking check was set from four consecutive real partitions (2026-09-10 to
 | `duplicate_chart_positions` | Repeated `(country, position)` keys | 0 of 7,315 | = 0 |
 | `artist_genre_coverage` | Tagged artists that got a genre | 0.948 | ≥ 0.85 (warn 0.92) |
 | `unclassified_tag_rate` | Genre tags cleansing could not classify | none yet | ≤ 0.35, **advisory** |
+| `charting_artists_unresolved` | Today's charting artists nobody has looked up | none yet | ≤ 0.90, **advisory** |
 
 `countries_present` exists because `chart_volume` provably cannot do its job:
 one country out of 75 is ~1.3% of rows, inside the noise of a row-count ratio.
@@ -654,35 +662,63 @@ gcloud builds submit --config cloudbuild.pipeline.yaml `
 ```
 
 It installs `requirements-pipeline.txt` and `requirements-cloud.txt` only — no
-fastapi, no uvicorn. `ENTRYPOINT ["python"]` is the contract with Workflows:
-each step overrides the container args (`-m scripts.run_load`), so one job
-definition covers all eleven stages. With no args it exits non-zero with a
-message rather than opening a REPL and succeeding silently.
+fastapi, no uvicorn. `ENTRYPOINT ["python"]` with `CMD ["-m",
+"scripts.run_pipeline"]`: the deployed job carries no `command` and no `args`,
+so the image's default **is** the nightly behaviour. An execution can still
+override the args to re-run one stage by hand.
 
 The same repo-root `.gcloudignore` governs this build; it excludes
 `backend/data/` and `backend/tests/` and nothing the image COPYs, so no second
 ignore file is needed.
 
-Then the job:
+### Deploying a new image — the job already exists
+
+`gcloud run jobs create` fails with "already exists" and applies **nothing**.
+Use `update`, and never with `--set-env-vars` unless you have just read the
+current spec: that flag **replaces** the whole environment, and this job carries
+a `PUBLISH_DIR` pointing at a different bucket plus a Secret Manager reference
+that a blind `--set-env-vars` would silently drop.
 
 ```powershell
-gcloud run jobs create world-genre-pipeline `
-  --image=asia-southeast3-docker.pkg.dev/world-genre-natt/world-genre/pipeline `
-  --region=asia-southeast3 `
-  --task-timeout=3600 --max-retries=1 `
-  --set-env-vars=BQ_DATASET=world-genre-natt.world_genre,DATA_DIR=gs://world_genre_bucket,PUBLISH_DIR=gs://world_genre_bucket/published
-
-# Smoke test: this stage is idempotent and touches nothing else.
-gcloud run jobs execute world-genre-pipeline --region=asia-southeast3 `
-  --args=-m,scripts.run_init_bq --wait
+gcloud run jobs describe world-genre-pipeline --region=asia-southeast3 --format=export
 ```
 
-**Then test one extractor from the job before building anything on top of it.**
-It runs from a datacentre IP rather than a home connection; MusicBrainz
-throttles those harder and scrapers sometimes block cloud ranges outright. If
-`run_extract_kworb` fails there, the whole scheduling plan needs a different
-shape, and that is much cheaper to learn now than after the workflow and
-scheduler exist.
+**Pin the image by digest, not by tag.** The image path has no version, so a
+plain `gcloud builds submit` overwrites `:latest` — the exact tag production
+runs. That happened on 2026-09-14: a laptop build replaced the image the nightly
+job had used since August, and the only reason it wasn't an outage is that the
+new default failed loudly and the job was rolled back before 17:00 UTC. API
+images are tagged by commit SHA for precisely this reason; this one should be
+too.
+
+```powershell
+# Find the digest you just pushed
+gcloud artifacts docker images list `
+  asia-southeast3-docker.pkg.dev/world-genre-natt/world-genre/pipeline --include-tags
+
+gcloud run jobs update world-genre-pipeline --region=asia-southeast3 `
+  --image=asia-southeast3-docker.pkg.dev/world-genre-natt/world-genre/pipeline@sha256:<digest>
+
+# Verify by hand BEFORE the scheduler runs it. run_init_bq is idempotent.
+gcloud run jobs execute world-genre-pipeline --region=asia-southeast3 `
+  --args="-m,scripts.run_init_bq" --wait
+```
+
+Note the quotes on `--args`. PowerShell treats a bare comma as its array
+operator, so `--args=-m,scripts.run_init_bq` arrives mangled and the container
+dies with `No module named ' scripts'` — a leading space that points at Python
+when the fault is the shell.
+
+### PowerShell and gcloud quoting
+
+Three variants of the same trap have cost time on this project, each producing
+an error that names the wrong thing:
+
+| Symptom | Actual cause |
+| --- | --- |
+| `bq`: `Syntax error: Unexpected end of script` | Only the first line of a multi-line argument is passed. Flatten: `($q -replace "\r?\n", " ")` |
+| Cloud Run: `No module named ' scripts'` | Comma treated as the array operator. Quote the whole value: `--args="-m,scripts.run_load"` |
+| `gcloud logging read`: `Unparseable filter … token ':'` | Embedded double quotes stripped, so a timestamp's colons break the filter. Filter client-side, or escape the inner quotes |
 
 ---
 
