@@ -33,6 +33,9 @@ def captured(monkeypatch):
         WriteDisposition=types.SimpleNamespace(
             WRITE_TRUNCATE="TRUNCATE", WRITE_APPEND="APPEND"
         ),
+        CreateDisposition=types.SimpleNamespace(
+            CREATE_NEVER="CREATE_NEVER", CREATE_IF_NEEDED="CREATE_IF_NEEDED"
+        ),
     )
     monkeypatch.setattr(bq_load, "_require_bigquery", lambda: fake_bigquery)
     monkeypatch.setattr(bq_load, "get_client", lambda: _FakeClient())
@@ -83,3 +86,40 @@ class TestMergeDimension:
     def test_insert_lists_every_column_of_the_first_row(self, captured):
         bq_load.merge_dimension("artists", "artist_name", ROWS)
         assert "INSERT (artist_name, mbid)" in captured["sql"]
+
+
+class TestAppendRowsNeverCreatesTheTable:
+    """A load job against a missing table CREATES it, inferring a schema.
+
+    That is not hypothetical: it is how mb_artists and mb_artist_names came to
+    exist in production carrying neither the PRIMARY KEY nor the FOREIGN KEY
+    schema.sql declares for them, which broke run_init_bq weeks later with
+    "Table ...mb_artists does not have Primary Key constraints". The CREATE
+    statements had been no-ops the entire time and nothing said so.
+
+    CREATE_NEVER makes a missing table a loud failure pointing at run_init_bq,
+    rather than a quiet success that invents a schema from one batch of rows.
+    """
+
+    def test_create_disposition_is_create_never(self, monkeypatch):
+        seen = {}
+        fake_bigquery = types.SimpleNamespace(
+            LoadJobConfig=lambda **kwargs: seen.update(kwargs) or "config",
+            SourceFormat=types.SimpleNamespace(NEWLINE_DELIMITED_JSON="NDJSON"),
+            WriteDisposition=types.SimpleNamespace(
+                WRITE_TRUNCATE="TRUNCATE", WRITE_APPEND="APPEND"
+            ),
+            CreateDisposition=types.SimpleNamespace(
+                CREATE_NEVER="CREATE_NEVER", CREATE_IF_NEEDED="CREATE_IF_NEEDED"
+            ),
+        )
+        monkeypatch.setattr(bq_load, "_require_bigquery", lambda: fake_bigquery)
+        monkeypatch.setattr(bq_load, "get_client", lambda: _FakeClient())
+        monkeypatch.setattr(bq_load, "dataset_id", lambda: "proj.ds")
+
+        assert bq_load.append_rows("chart_entries", ROWS) == 1
+        assert seen["create_disposition"] == "CREATE_NEVER"
+        # Paired with autodetect=False for the same reason: the warehouse
+        # schema is declared in one place, and neither flag lets a load job
+        # quietly become the authority on it.
+        assert seen["autodetect"] is False

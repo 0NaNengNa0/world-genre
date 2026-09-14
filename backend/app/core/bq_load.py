@@ -78,6 +78,14 @@ def append_rows(table: str, rows: list[dict]) -> int:
         # them differently for a batch where every nullable measure happened to
         # be absent.
         autodetect=False,
+        # And it must ALREADY exist: a load job silently CREATES a missing
+        # table, which is how mb_artists and mb_artist_names came to exist in
+        # production without the PRIMARY KEY and FOREIGN KEY their DDL declares.
+        # The CREATE statements had been no-ops ever since, so schema.sql and
+        # the warehouse disagreed with nothing to say so. CREATE_NEVER turns
+        # "the table is missing" into a loud failure that points at run_init_bq,
+        # instead of a quiet success that invents a schema from one batch.
+        create_disposition=bigquery.CreateDisposition.CREATE_NEVER,
     )
     job = client.load_table_from_json(
         rows, f"{dataset_id()}.{table}", job_config=job_config

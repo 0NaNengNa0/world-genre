@@ -309,11 +309,34 @@ CLUSTER BY mbid;
 -- names. `is_primary` is the tie-breaker - a primary-name match should beat an
 -- alias match, and a tie between two primaries should resolve to nothing
 -- rather than to a guess.
+--
+-- NO FOREIGN KEY to mb_artists, and the reason is worth reading before adding
+-- one back. This file declared `FOREIGN KEY (mbid) REFERENCES mb_artists`, and
+-- it failed in production with:
+--
+--     400 Table ...mb_artists does not have Primary Key constraints
+--
+-- because BOTH of these tables were created by a LOAD JOB, not by this file. A
+-- BigQuery load job against a table that does not exist creates it, inferring
+-- the schema from the data - so run_import_mb_dump.py brought them into being
+-- before run_init_bq ever ran, and the CREATE statements here have been no-ops
+-- against a pair of tables that never carried the constraints they declare.
+-- The DDL and the warehouse disagreed, silently, for as long as they existed.
+--
+-- The FK cannot simply be restored, because fixing it means giving the live
+-- mb_artists a primary key, and BigQuery's `ALTER TABLE ... ADD PRIMARY KEY`
+-- has no IF NOT EXISTS form - it errors the second time it runs. run_init_bq
+-- executes this whole file nightly as stage one, so a statement that succeeds
+-- once and fails forever after would take the pipeline down every night.
+--
+-- Dropping the declaration costs nothing real: the key was NOT ENFORCED, so it
+-- guaranteed no integrity, and the relationship is documented in this comment
+-- instead. The grain is stated above; the join in merges/resolve_artists.sql
+-- is what actually depends on it, and that query is tested.
 CREATE TABLE IF NOT EXISTS `{dataset}.mb_artist_names` (
     match_name STRING NOT NULL,
     mbid STRING NOT NULL,
-    is_primary BOOL NOT NULL,
-    FOREIGN KEY (mbid) REFERENCES `{dataset}.mb_artists` (mbid) NOT ENFORCED
+    is_primary BOOL NOT NULL
 )
 CLUSTER BY match_name;
 

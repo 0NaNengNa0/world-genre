@@ -239,6 +239,12 @@ def _load(table: str, rows: list[dict], truncate: bool) -> None:
             source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
             write_disposition=disposition,
             autodetect=False,
+            # Run run_init_bq first. Without this, a load job against a missing
+            # table creates it - which is exactly what happened here the first
+            # time: both mirror tables were born from this load job rather than
+            # from schema.sql, so they never carried the keys their DDL
+            # declares and the CREATEs have been silent no-ops ever since.
+            create_disposition=bigquery.CreateDisposition.CREATE_NEVER,
         ),
     ).result()
 
