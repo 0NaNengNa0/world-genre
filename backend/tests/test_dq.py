@@ -291,3 +291,52 @@ class TestRecordShape:
         # Kept because "this check has been abstaining for a week" is exactly
         # the pattern a skip is supposed to make visible.
         assert written["rows"][0]["status"] == dq.SKIP
+
+
+class TestValidateExitCodes:
+    """The gate's exit code is an orchestrator's only input - get it right.
+
+    run_validate returns 1 for "a check ran and the data failed it" and 2 for
+    "a check could not run". The DAG maps the first onto AirflowFailException
+    (terminal, skips the retry policy) and the second onto a retryable
+    AirflowException, because retrying a deterministic assertion against an
+    unchanged partition just burns two more attempts to learn the same thing.
+    """
+
+    def _exit_code(self, monkeypatch, results):
+        from scripts import run_validate
+
+        monkeypatch.setattr(dq, "run_checks", lambda day, checks=None: results)
+        return run_validate.main(["--no-record"])
+
+    def test_all_passing_exits_zero(self, monkeypatch):
+        results = [dq.evaluate(make_check(), 0.99)]
+        assert self._exit_code(monkeypatch, results) == 0
+
+    def test_data_failure_exits_one(self, monkeypatch):
+        results = [dq.evaluate(make_check(), 0.1)]
+        assert self._exit_code(monkeypatch, results) == 1
+
+    def test_execution_error_exits_two(self, monkeypatch):
+        results = [dq.error(make_check(), "403 Access Denied")]
+        assert self._exit_code(monkeypatch, results) == 2
+
+    def test_data_failure_outranks_an_error(self, monkeypatch):
+        # Both present: report the one a retry cannot fix, otherwise the
+        # orchestrator retries its way around a loop it can never exit.
+        results = [
+            dq.error(make_check(), "network blip"),
+            dq.evaluate(make_check(), 0.1),
+        ]
+        assert self._exit_code(monkeypatch, results) == 1
+
+    def test_skips_alone_do_not_fail_the_run(self, monkeypatch):
+        # A check that abstained has not failed. An empty enough partition is
+        # chart_volume's problem to report, not everyone's.
+        results = [dq.evaluate(make_check(), None, sample_size=0)]
+        assert self._exit_code(monkeypatch, results) == 0
+
+    def test_warnings_alone_do_not_fail_the_run(self, monkeypatch):
+        check = make_check(comparison="min", threshold=0.8, warn_threshold=0.9)
+        results = [dq.evaluate(check, 0.85)]
+        assert self._exit_code(monkeypatch, results) == 0

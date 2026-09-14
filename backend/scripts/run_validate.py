@@ -19,12 +19,32 @@ genres.
 Results are written to dq_runs whether they pass or fail, and are written
 before the exit code is decided - a failed run that records nothing about why
 it failed is the version of this stage that helps no one.
+
+TWO KINDS OF NON-ZERO, because an orchestrator needs to tell them apart:
+
+    0  every blocking check passed
+    1  a check ran and the DATA failed it - deterministic, do not retry.
+       Rerunning the identical query against the identical partition will
+       fail identically, so a retry policy just burns two more attempts and
+       ten more minutes before reporting the same thing.
+    2  a check could not RUN - a 403, a network blip, a BigQuery outage.
+       Transient by nature, and exactly what retries are for.
+
+A data failure wins when both are present: retrying cannot fix it, so the
+run should stop rather than pretend the error was the whole story. A plain
+shell chain (`... && python -m scripts.run_validate && ...`) still stops on
+either, so this costs nothing for the simple case and buys a real retry
+policy for the Airflow DAG (see dags/genre_pipeline_dag.py).
 """
 import argparse
 import logging
 from datetime import date, datetime, timezone
 
 from app.core import dq
+
+EXIT_OK = 0
+EXIT_DATA_FAILED = 1
+EXIT_CHECK_ERROR = 2
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger("run_validate")
@@ -107,12 +127,17 @@ def main(argv: list[str] | None = None) -> int:
             "previous run's JSON until this is resolved.",
             ", ".join(r.check.name for r in failed),
         )
-    if failed or errored:
-        return 1
+    # Data failure outranks an execution error: a retry cannot fix bad data,
+    # so reporting "transient, try again" when a partition is genuinely wrong
+    # would send the orchestrator round a loop it can never exit.
+    if failed:
+        return EXIT_DATA_FAILED
+    if errored:
+        return EXIT_CHECK_ERROR
     if counts[dq.WARN] and args.fail_on_warn:
         logger.error("Warnings present and --fail-on-warn set.")
-        return 1
-    return 0
+        return EXIT_DATA_FAILED
+    return EXIT_OK
 
 
 if __name__ == "__main__":

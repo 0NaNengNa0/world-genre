@@ -150,7 +150,19 @@ $env:BQ_DATASET = "world-genre-natt.world_genre"
 ```
 
 `run_validate` exits non-zero when a blocking check fails, which is what stops
-the chain before `run_publish`. Because the API serves static JSON rather than
+the chain before `run_publish`. There are two kinds of non-zero, and the
+difference is what lets an orchestrator retry intelligently:
+
+| Exit | Meaning | Retry? |
+| --- | --- | --- |
+| 0 | Every blocking check passed | — |
+| 1 | A check ran and the **data** failed it | No — deterministic |
+| 2 | A check **could not run** (403, network, outage) | Yes — transient |
+
+A data failure outranks an execution error when both occur: retrying cannot fix
+bad data, so reporting "transient" would send the orchestrator round a loop it
+can never exit. A plain shell chain still stops on either, so this costs nothing
+for a manual run. Because the API serves static JSON rather than
 querying BigQuery, a publish that doesn't happen leaves the previous run's good
 data in place — bad data can land in the warehouse without ever being served.
 That ordering is the **write-audit-publish** pattern, and it is the reason the
@@ -524,25 +536,42 @@ cent.
 
 ## Scheduling (not deployed)
 
-The pipeline currently runs on demand. To automate it, each stage becomes a
-Cloud Run **Job** — not a Service, because jobs run to completion and allow long
-timeouts, and the MusicBrainz stage alone runs 33 minutes cold. Cloud Scheduler
-triggers the chain daily. Cost is effectively zero.
+The pipeline currently runs on demand. The plan is written out as
+`pipeline-workflow.yaml` at the repo root: **Cloud Run Jobs driven by Cloud
+Workflows, triggered daily by Cloud Scheduler.**
 
-`run_validate` is a stage in that chain, between load and publish, and its exit
-code is what the chain must branch on — an unattended daily run is precisely
-the case the gate exists for, since nobody is watching the log at 3am.
+Jobs, not Services, because jobs run to completion and tolerate long timeouts —
+the MusicBrainz crawl alone runs 33 minutes cold, and a Service would need a
+request held open for the duration. One job with container args overridden per
+stage rather than one job per stage: fewer resources to create and keep in sync,
+and straightforward to express in Terraform later. The cost is that every stage
+shares one CPU, memory and timeout configuration, so splitting out the
+MusicBrainz stage is the first move if that pinches.
 
-This needs a pipeline image, which doesn't exist yet — `Dockerfile.api` builds
-the API, and the Airflow image isn't the right shape for a job.
+Workflows rather than Scheduler alone, because Scheduler gives one trigger and
+nothing else. Workflows restores the parts of the DAG actually in use: ordered
+steps, parallel branches, per-step retries, and a conditional — the gate runs
+beside the enrichment stages and sets a shared flag rather than raising, so a
+blocked run still keeps its rate-limited enrichment work. Publish is skipped;
+the pipeline is not.
 
-**Test one extractor from a Cloud Run Job before relying on it.** They'd be
-running from a datacentre IP rather than a home connection; MusicBrainz
-throttles those harder and scrapers sometimes block cloud ranges outright.
+**Cloud Composer is deliberately not used.** Airflow is free; Composer is not —
+it bills for an always-on scheduler, web server and GKE cluster, roughly
+$400/month to run a pipeline that executes for minutes a day. That is 40× the
+rest of this project combined. `backend/dags/genre_pipeline_dag.py` stays in the
+repo as the documented orchestration and for local `docker-compose` runs.
 
-Cloud Composer is deliberately not used: it bills ~$400/month for an always-on
-cluster, 40× everything else here combined. The DAG stays in the repo as the
-documented orchestration.
+Two honest limitations of the Workflows version, both in the file's header
+comment: it sees only "the job failed", not the exit code, so `run_validate`'s
+1-vs-2 distinction is invisible there (the fix, if it mattered, is a BigQuery
+connector step querying `dq_runs`); and there is no backfill or task-level UI.
+
+Still outstanding before any of it can run: a **pipeline container image** —
+`Dockerfile.api` builds the API and the Airflow image is the wrong shape for a
+job. And **test one extractor from a Cloud Run Job before building on it**:
+these would run from a datacentre IP rather than a home connection, and
+MusicBrainz throttles those harder while scrapers sometimes block cloud ranges
+outright.
 
 ---
 

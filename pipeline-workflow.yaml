@@ -1,0 +1,279 @@
+# Cloud Workflows definition for the World Genre data pipeline.
+#
+# NOT DEPLOYED YET. What is missing, honestly:
+#   1. A pipeline container image. Dockerfile.api builds the API; the Airflow
+#      image is the wrong shape for a job. Needs a Dockerfile whose entrypoint
+#      is `python` so `args: ["-m", "scripts.run_load"]` works.
+#   2. The Cloud Run Job itself (commands at the bottom of this file).
+#   3. One extractor proven to work from a datacentre IP. MusicBrainz throttles
+#      cloud ranges harder than home connections and scrapers sometimes block
+#      them outright - test that BEFORE building the rest on the assumption.
+#
+# WHY THIS AND NOT AIRFLOW. Airflow is free; Cloud Composer is not - it bills
+# for an always-on scheduler, web server and GKE cluster, roughly $400/month to
+# run a pipeline that executes for minutes a day. Cloud Run Jobs scale to zero
+# and Workflows charges per step, so this costs approximately nothing at one
+# execution a day. dags/genre_pipeline_dag.py stays in the repo as the
+# documented orchestration and for local runs; this is what would actually be
+# scheduled.
+#
+# The general principle: an orchestrator's overhead is justified by the NUMBER
+# OF INTERDEPENDENT PIPELINES, not by the complexity of one. Airflow earns its
+# keep across fifty DAGs with shared upstream dependencies and backfills to
+# manage. One linear daily pipeline does not reach that bar.
+#
+# WHAT THIS GIVES UP versus the DAG, stated plainly rather than glossed:
+#   - Workflows sees only "the job succeeded" or "the job failed". It cannot
+#     read the exit code, so run_validate's deliberate 1-vs-2 split (data
+#     failed / check could not run) is invisible here, and the retry policy
+#     below cannot distinguish deterministic failures from transient ones the
+#     way the DAG's AirflowFailException does. If that distinction mattered
+#     enough, the fix is a step using the BigQuery connector to query dq_runs
+#     for the latest statuses and branch on those - the gate already writes
+#     them.
+#   - No backfill, no task-level UI, no historical run comparison beyond logs.
+#
+# ONE JOB, ARGS OVERRIDDEN PER STAGE, rather than one job per stage. Fewer
+# resources to create and keep in sync, which also makes this straightforward
+# to express in Terraform later. The cost is that every stage shares one CPU,
+# memory and timeout configuration - and the MusicBrainz crawl needs a far
+# longer timeout than the others. Splitting that one stage into its own job is
+# the first thing to do if that becomes a problem.
+
+main:
+  steps:
+    - init:
+        assign:
+          - project: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
+          - location: "asia-southeast3"
+          - job: "world-genre-pipeline"
+          # Set by the gate branch below instead of raising, so that a blocked
+          # run still lets the enrichment branches finish. See the comment on
+          # the post_load step.
+          - gate_blocked: false
+
+    # kworb and Last.fm have no dependencies and no overlap - the only two
+    # stages that are genuinely independent.
+    - extract_sources:
+        parallel:
+          branches:
+            - kworb:
+                steps:
+                  - run_kworb:
+                      call: run_stage
+                      args:
+                        project: ${project}
+                        location: ${location}
+                        job: ${job}
+                        module: "scripts.run_extract_kworb"
+            - lastfm:
+                steps:
+                  - run_lastfm:
+                      call: run_stage
+                      args:
+                        project: ${project}
+                        location: ${location}
+                        job: ${job}
+                        module: "scripts.run_extract_lastfm"
+
+    # Both prefer Last.fm's mbids and fall back to the kworb chart rows, so
+    # both wait for both.
+    - enrich_sources:
+        parallel:
+          branches:
+            - musicbrainz:
+                steps:
+                  - run_musicbrainz:
+                      call: run_stage
+                      args:
+                        project: ${project}
+                        location: ${location}
+                        job: ${job}
+                        module: "scripts.run_extract_musicbrainz"
+                        # The 33-minute cold crawl. This one number is the
+                        # reason the pipeline runs on Cloud Run JOBS rather
+                        # than Services: a Service would need a request held
+                        # open for the duration.
+                        timeout: 3600
+            - deezer:
+                steps:
+                  - run_deezer:
+                      call: run_stage
+                      args:
+                        project: ${project}
+                        location: ${location}
+                        job: ${job}
+                        module: "scripts.run_extract_deezer"
+
+    # Strictly after deezer: it only asks Wikidata about the artists deezer
+    # failed to find a photo for, so it needs deezer's misses to know what to
+    # look up.
+    - extract_wikidata:
+        call: run_stage
+        args:
+          project: ${project}
+          location: ${location}
+          job: ${job}
+          module: "scripts.run_extract_wikidata"
+
+    - cleanse:
+        call: run_stage
+        args:
+          project: ${project}
+          location: ${location}
+          job: ${job}
+          module: "scripts.run_cleanse"
+
+    # Idempotent (CREATE TABLE IF NOT EXISTS throughout), so it runs every
+    # time rather than being a setup step someone has to remember.
+    - ensure_schema:
+        call: run_stage
+        args:
+          project: ${project}
+          location: ${location}
+          job: ${job}
+          module: "scripts.run_init_bq"
+
+    - load:
+        call: run_stage
+        args:
+          project: ${project}
+          location: ${location}
+          job: ${job}
+          module: "scripts.run_load"
+
+    # The gate runs BESIDE the enrichment stages, not before them.
+    #
+    # No check reads enrichment output - they all assert on what load wrote -
+    # so the gate can start the moment load finishes, and a bad partition is
+    # known in minutes rather than after the rate-limited crawls.
+    #
+    # The gate's failure is captured into `gate_blocked` rather than allowed to
+    # propagate, because an exception inside a parallel branch aborts its
+    # siblings. Enrichment work is worth keeping even on a day whose chart data
+    # is bad: merge_dimension preserves it, MusicBrainz is ~1 req/sec, and
+    # discarding an hour of lookups to punish a short scrape helps nobody. The
+    # gate blocks PUBLISH, not the pipeline.
+    - post_load:
+        parallel:
+          shared: [gate_blocked]
+          branches:
+            - enrich_artists:
+                steps:
+                  - run_artist_meta:
+                      call: run_stage
+                      args:
+                        project: ${project}
+                        location: ${location}
+                        job: ${job}
+                        module: "scripts.run_extract_artist_meta"
+                        timeout: 3600
+            - enrich_genres:
+                steps:
+                  - run_genre_info:
+                      call: run_stage
+                      args:
+                        project: ${project}
+                        location: ${location}
+                        job: ${job}
+                        module: "scripts.run_extract_genre_info"
+            - gate:
+                steps:
+                  - try_validate:
+                      try:
+                        call: run_stage
+                        args:
+                          project: ${project}
+                          location: ${location}
+                          job: ${job}
+                          module: "scripts.run_validate"
+                      except:
+                        as: e
+                        steps:
+                          - mark_blocked:
+                              assign:
+                                - gate_blocked: true
+                          - log_blocked:
+                              call: sys.log
+                              args:
+                                severity: "ERROR"
+                                text: "Data-quality gate blocked the run. Query dq_runs for the failing checks."
+
+    - decide:
+        switch:
+          - condition: ${gate_blocked}
+            next: blocked
+
+    - publish:
+        call: run_stage
+        args:
+          project: ${project}
+          location: ${location}
+          job: ${job}
+          module: "scripts.run_publish"
+
+    - published:
+        return:
+          status: "published"
+
+    # Returning rather than raising: the run did what it should have done.
+    # A gate that stops a bad publish is the system working, and paging
+    # someone with a red execution teaches them to ignore red executions.
+    # The signal that matters - which check failed and by how much - is in
+    # dq_runs, not in this return value.
+    - blocked:
+        return:
+          status: "blocked"
+          detail: "Publish skipped; the API keeps serving the previous run's JSON."
+
+# One Cloud Run Job execution, with the module to run passed as container args.
+# The connector blocks until the execution finishes, so each call is a real
+# dependency edge rather than a fire-and-forget.
+run_stage:
+  params:
+    - project
+    - location
+    - job
+    - module
+    - timeout: 1800
+  steps:
+    - execute:
+        call: googleapis.run.v2.projects.locations.jobs.run
+        args:
+          name: ${"projects/" + project + "/locations/" + location + "/jobs/" + job}
+          body:
+            overrides:
+              containerOverrides:
+                - args: ["-m", "${module}"]
+          connector_params:
+            timeout: ${timeout}
+        result: execution
+    - done:
+        return: ${execution}
+
+# --- Deploying this, once the pipeline image exists -------------------------
+#
+#   gcloud run jobs create world-genre-pipeline `
+#     --image=asia-southeast3-docker.pkg.dev/world-genre-natt/world-genre/pipeline `
+#     --region=asia-southeast3 `
+#     --task-timeout=3600 `
+#     --max-retries=1 `
+#     --set-env-vars=BQ_DATASET=world-genre-natt.world_genre,DATA_DIR=gs://world_genre_bucket,PUBLISH_DIR=gs://world_genre_bucket/published
+#
+#   gcloud workflows deploy world-genre-pipeline `
+#     --source=pipeline-workflow.yaml `
+#     --location=asia-southeast3 `
+#     --service-account=pipeline-runner@world-genre-natt.iam.gserviceaccount.com
+#
+#   gcloud scheduler jobs create http world-genre-daily `
+#     --location=asia-southeast3 `
+#     --schedule="0 3 * * *" --time-zone=UTC `
+#     --uri="https://workflowexecutions.googleapis.com/v1/projects/world-genre-natt/locations/asia-southeast3/workflows/world-genre-pipeline/executions" `
+#     --oauth-service-account-email=pipeline-runner@world-genre-natt.iam.gserviceaccount.com
+#
+# The workflow's service account needs roles/run.invoker (to execute the job)
+# and roles/logging.logWriter (for sys.log). The JOB's service account is a
+# separate identity and needs the BigQuery and GCS access - roles/bigquery.jobUser,
+# roles/bigquery.dataEditor on the dataset, and object admin on the bucket.
+# Expect to discover at least one missing role the hard way: an Owner running
+# things by hand never finds out which permissions the work actually needs.
