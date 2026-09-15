@@ -12,6 +12,7 @@ than in a Cloud Run job at 6am.
 import re
 
 import pytest
+
 from app.core.config import SQL_DIR
 
 sqlglot = pytest.importorskip("sqlglot")

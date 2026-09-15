@@ -10,6 +10,7 @@ not everywhere.
 import types
 
 import pytest
+
 from scripts import run_load
 
 

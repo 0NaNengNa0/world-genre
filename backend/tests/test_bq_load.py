@@ -10,6 +10,7 @@ distinction is invisible at runtime and permanent once it has happened.
 import types
 
 import pytest
+
 from app.core import bq_load
 
 

@@ -12,6 +12,7 @@ existed only inside a container image. The order test below is what stops it
 drifting away from what has actually been running.
 """
 import pytest
+
 from scripts import run_pipeline
 from scripts.run_pipeline import STAGES, Stage, select_stages
 

@@ -16,6 +16,7 @@ especially that abstaining is not passing.
 import json
 
 import pytest
+
 from app.core import dq
 
 
