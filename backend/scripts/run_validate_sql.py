@@ -25,9 +25,33 @@ parsed cleanly under sqlglot and then failed in a Cloud Run job:
 Neither is a dialect error, so neither was catchable offline. Both are exactly
 what name resolution against the real schema catches in milliseconds.
 
-WHAT IT COSTS. Nothing. A dry run scans no bytes and is not billed. The only
-requirement is credentials that can read the dataset's metadata, which the
-deploy workflow already has via Workload Identity Federation.
+WHAT IT COSTS, AND WHAT IT REQUIRES. A dry run scans no bytes and is never
+billed. It does NOT follow that it needs no permissions - that assumption cost
+a red CI run on 2026-09-16.
+
+A dry run performs the FULL authorization check, not just parsing. BigQuery
+resolves every name and verifies access as if the query were about to execute;
+the only thing it skips is execution itself. So validating a SELECT requires
+`bigquery.tables.getData` on every table it touches - the same permission a
+real query needs. `roles/bigquery.metadataViewer` grants tables.get and
+tables.list, which is enough for INFORMATION_SCHEMA and NOT enough for this.
+
+DDL is stricter still: dry-running `CREATE TABLE IF NOT EXISTS` requires
+`bigquery.tables.create` on the dataset. That is a WRITE permission, and
+granting it to a CI identity whose entire purpose is to never write is the
+wrong trade - so in CI the schema statements are skipped (see SKIP_DDL_ENV).
+Nothing is lost by that:
+
+  - dialect errors in schema.sql are already caught offline by sqlglot in
+    tests/test_bigquery_sql.py,
+  - the DDL is EXECUTED nightly by run_init_bq as pipeline stage one, under a
+    service account that legitimately has write access, so a broken statement
+    fails there within a day,
+  - and scripts/run_check_schema.py compares the declared schema against
+    INFORMATION_SCHEMA using metadata reads alone.
+
+Locally, where the operator is usually project owner, DDL is validated by
+default.
 
 Run locally from the backend/ directory:
     python -m scripts.run_validate_sql
@@ -38,6 +62,7 @@ run", and collapsing them into one non-zero code destroys that distinction.
 """
 import datetime as dt
 import logging
+import os
 import re
 import sys
 
@@ -50,6 +75,14 @@ logger = logging.getLogger("run_validate_sql")
 EXIT_OK = 0
 EXIT_SQL_INVALID = 1
 EXIT_COULD_NOT_RUN = 2
+
+# Set to "1" in CI. An environment variable rather than an argparse flag, on
+# purpose: argparse exits 2 on a usage error, and 2 is already this script's
+# "could not run" code. run_pipeline.py had to move its check-error code off 2
+# for exactly this reason. Re-introducing the same overloaded exit status to
+# save four characters of ergonomics would be repeating a bug this repo has
+# already paid for once.
+SKIP_DDL_ENV = "VALIDATE_SQL_SKIP_DDL"
 
 QUERY_DIR = SQL_DIR / "bigquery" / "queries"
 CHECK_DIR = SQL_DIR / "bigquery" / "checks"
@@ -120,7 +153,7 @@ def _resolve(sql: str, dataset: str, weight_column: str | None = None) -> str:
     return sql
 
 
-def _statements_to_check(dataset: str) -> list[tuple[str, str]]:
+def _statements_to_check(dataset: str, include_ddl: bool = True) -> list[tuple[str, str]]:
     """(label, sql) for everything worth validating.
 
     The schema is included, not just the read queries. Its statements are the
@@ -133,10 +166,11 @@ def _statements_to_check(dataset: str) -> list[tuple[str, str]]:
 
     items: list[tuple[str, str]] = []
 
-    for i, statement in enumerate(
-        statements(SCHEMA_PATH.read_text(encoding="utf-8"), dataset), 1
-    ):
-        items.append((f"schema.sql[{i}]", statement))
+    if include_ddl:
+        for i, statement in enumerate(
+            statements(SCHEMA_PATH.read_text(encoding="utf-8"), dataset), 1
+        ):
+            items.append((f"schema.sql[{i}]", statement))
 
     for directory in (QUERY_DIR, CHECK_DIR, MERGE_DIR):
         for path in sorted(directory.glob("*.sql")):
@@ -153,11 +187,11 @@ def _statements_to_check(dataset: str) -> list[tuple[str, str]]:
     return items
 
 
-def validate(dataset: str) -> list[tuple[str, str]]:
+def validate(dataset: str, include_ddl: bool = True) -> list[tuple[str, str]]:
     """Dry-run everything. Returns [(label, error)] for what failed."""
     failures: list[tuple[str, str]] = []
 
-    for label, sql in _statements_to_check(dataset):
+    for label, sql in _statements_to_check(dataset, include_ddl):
         try:
             params = _params_for(sql)
         except KeyError as e:
@@ -189,10 +223,15 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("%s", e)
         return EXIT_COULD_NOT_RUN
 
-    logger.info("Dry-running every statement against %s", dataset)
+    include_ddl = os.environ.get(SKIP_DDL_ENV, "") != "1"
+    logger.info(
+        "Dry-running %s against %s",
+        "every statement" if include_ddl else "queries/checks/merges (DDL skipped)",
+        dataset,
+    )
 
     try:
-        failures = validate(dataset)
+        failures = validate(dataset, include_ddl)
     except Exception as e:
         # Could not reach BigQuery at all - missing credentials, no network,
         # no such dataset. Not the same as "the SQL is wrong", and a caller

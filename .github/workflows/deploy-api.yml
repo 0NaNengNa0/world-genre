@@ -58,6 +58,15 @@ jobs:
         working-directory: backend
     env:
       BQ_DATASET: world-genre-natt.world_genre
+      # A dry run performs the FULL authorization check - it skips execution,
+      # not permissions. Validating the DDL therefore needs
+      # bigquery.tables.create on the dataset, which is a WRITE permission on a
+      # identity whose whole job is to never write. Skipped here instead.
+      # schema.sql is still covered: sqlglot parses it offline in
+      # tests/test_bigquery_sql.py, run_init_bq executes it nightly under the
+      # pipeline's own service account, and run_check_schema compares it to
+      # INFORMATION_SCHEMA using metadata reads alone.
+      VALIDATE_SQL_SKIP_DDL: "1"
 
     steps:
       - uses: actions/checkout@v4
@@ -79,9 +88,13 @@ jobs:
           workload_identity_provider: projects/411464225527/locations/global/workloadIdentityPools/github/providers/github-provider
           service_account: github-deployer@world-genre-natt.iam.gserviceaccount.com
 
-      # Dry runs only. Nothing is executed and no bytes are scanned, so this
-      # step cannot change or cost anything - it needs bigquery.jobs.create
-      # and read access to the dataset's metadata, nothing more.
+      # Dry runs only: nothing executes and no bytes are scanned, so this step
+      # cannot change or cost anything. It is NOT permission-free, though -
+      # a dry run authorizes as if it were executing, so this needs
+      # bigquery.jobs.create (roles/bigquery.jobUser) AND
+      # bigquery.tables.getData (roles/bigquery.dataViewer) on every table the
+      # queries touch. Granting only metadataViewer fails every statement with
+      # a 403, which is how this was discovered.
       - name: Validate SQL against BigQuery
         run: python -m scripts.run_validate_sql
 

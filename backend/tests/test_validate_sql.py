@@ -9,7 +9,11 @@ erroring.
 """
 import pytest
 
-from scripts.run_validate_sql import PARAM_SAMPLES, _params_for, _statements_to_check
+from scripts.run_validate_sql import (
+    PARAM_SAMPLES,
+    _params_for,
+    _statements_to_check,
+)
 
 
 class TestParams:
@@ -66,6 +70,24 @@ class TestStatementCollection:
         assert len(variants) == 2
         assert any("[score]" in v for v in variants)
         assert any("[distinctiveness]" in v for v in variants)
+
+    def test_ddl_can_be_skipped(self):
+        """CI skips the schema statements, and it must skip ONLY those.
+
+        Dry-running DDL needs bigquery.tables.create - a write permission on an
+        identity that exists to never write. Everything else still runs, so a
+        regression that quietly dropped the queries too would defeat the gate
+        while still reporting green.
+        """
+        labels = [label for label, _ in _statements_to_check("p.d", include_ddl=False)]
+        assert not any(label.startswith("schema.sql") for label in labels)
+        for prefix in ("queries/", "checks/", "merges/"):
+            assert any(label.startswith(prefix) for label in labels), prefix
+
+    def test_skipping_ddl_removes_exactly_the_schema_statements(self):
+        full = len(_statements_to_check("p.d", include_ddl=True))
+        without = len(_statements_to_check("p.d", include_ddl=False))
+        assert full - without == 15
 
     def test_dataset_placeholder_is_substituted(self):
         for label, sql in _statements_to_check("p.d"):
