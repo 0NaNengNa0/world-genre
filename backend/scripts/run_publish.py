@@ -116,14 +116,56 @@ def _domestic_share(row: dict | None) -> dict | None:
     `coverage_percentage` travels with the figure deliberately. Domestic share
     is uninterpretable without it: 40 percent domestic means nothing if only
     a tenth of the country's streams have a known artist origin.
+
+    FIXED 2026-09-17. This read `row["domestic_percentage"]`,
+    `row["coverage_percentage"]` and `row["total_entries"]` - none of which
+    either query returns. Both domestic_share.sql and domestic_share_all.sql
+    return the raw components (total_streams, classified_streams,
+    domestic_streams, entry_count, classified_entries) and leave the arithmetic
+    to the caller. So the guard on "total_entries" saw None for every row and
+    returned None every time, for every country, on BOTH the map and the detail
+    view. Domestic share - the number this whole product is built around - had
+    never rendered.
+
+    Worth noting WHY nothing caught it. The SQL is valid and resolves, so the
+    BigQuery dry run passes it. The column names are consistent within each
+    layer; they just disagree ACROSS the boundary. And a unit test written from
+    the same assumption as this function would have fed it a dict with
+    `total_entries` in it and agreed with the bug - the exact failure mode
+    claude/backend-map.md warns about. The fixture below is built from the real
+    query's column list instead.
+
+    DENOMINATORS, chosen deliberately:
+
+      domestic_percentage = domestic / CLASSIFIED, not / total.
+        Dividing by total would fold "origin unknown" into "imported", so a
+        country with poor coverage would look domestically weak rather than
+        unmeasured. That conflation is precisely what coverage_percentage
+        exists to prevent, so baking it into the numerator would defeat it.
+
+      coverage_percentage = classified / total streams, not entries.
+        A chart's streams are wildly unevenly distributed; attributing 50 of
+        100 entries can mean 90 percent or 10 percent of the listening. The
+        entry counts still travel alongside for context.
     """
-    if not row or not row.get("total_entries"):
+    if not row or not row.get("entry_count"):
         return None
+
+    total_streams = float(row.get("total_streams") or 0)
+    classified_streams = float(row.get("classified_streams") or 0)
+    domestic_streams = float(row.get("domestic_streams") or 0)
+
     return {
-        "domestic_percentage": float(row["domestic_percentage"] or 0),
-        "coverage_percentage": float(row["coverage_percentage"] or 0),
-        "classified_entries": int(row["classified_entries"] or 0),
-        "total_entries": int(row["total_entries"] or 0),
+        # Guarded rather than assumed non-zero: a country can chart with every
+        # stream count NULL, which COALESCEs to 0 upstream.
+        "domestic_percentage": (
+            domestic_streams / classified_streams * 100 if classified_streams else 0.0
+        ),
+        "coverage_percentage": (
+            classified_streams / total_streams * 100 if total_streams else 0.0
+        ),
+        "classified_entries": int(row.get("classified_entries") or 0),
+        "total_entries": int(row.get("entry_count") or 0),
     }
 
 

@@ -4,7 +4,20 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>frontend</title>
+
+    <!-- Headline display faces, rotated by App.tsx. preconnect because the CSS
+         and the font files come from two different origins, so without it the
+         browser pays a fresh DNS+TLS handshake mid-render. display=swap renders
+         the fallback immediately rather than blanking the headline while a
+         display face downloads. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Anton&family=Black+Ops+One&family=Bungee&family=Bungee+Tint&family=Caveat&family=Comic+Relief&family=Fjalla+One&family=Orbitron&display=swap"
+      rel="stylesheet"
+    />
+
+    <title>World Genre</title>
   </head>
   <body>
     <div id="root"></div>

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 import {
   fetchCountries,
@@ -41,23 +41,52 @@ const COLOR_MODES: { id: ColorMode; label: string }[] = [
  * back to the body font and making the rotation look broken.
  */
 const HEADLINE_FONTS = [
-  'ui-serif, Georgia, "Times New Roman", serif',
-  'ui-monospace, "Cascadia Code", Consolas, "Courier New", monospace',
-  '"Trebuchet MS", "Segoe UI", system-ui, sans-serif',
-  '"Arial Black", Impact, sans-serif',
-  'Verdana, Geneva, sans-serif',
-  '"Palatino Linotype", "Book Antiqua", Palatino, serif',
+  "'Comic Relief', cursive",
+  "'Black Ops One', system-ui",
+  "'Fjalla One', sans-serif",
+  "'Anton', sans-serif",
+  "'Bungee Tint', system-ui",
+  "'Caveat', cursive",
+  "'Orbitron', sans-serif",
+  "'Bungee', system-ui",
 ]
 
 const TITLE = 'World Genre'
-const SUBTITLE = 'The sound of the charts, country by country.'
+// Shown before the first payload arrives, and whenever no country has a top
+// artist yet.
+const DEFAULT_SUBTITLE = 'The sound of the charts, country by country.'
+
+/**
+ * A line drawn from the LIVE payload rather than a fixed string.
+ *
+ * This replaces a request for rotating song lyrics. Two reasons, both hard:
+ * the pipeline has no lyrics source - no extractor, no table, nothing to read -
+ * and published song lyrics are copyrighted, so they are not something to
+ * reproduce here regardless. What the payload does carry is which artist is
+ * actually topping which country's chart tonight, which is real data from this
+ * project's own warehouse and needs no new dependency.
+ *
+ * Drawn from the top 3 rather than only the number 1, so a country does not
+ * always produce the same line.
+ */
+function pickSubtitle(countries: CountrySummary[]): string {
+  const withArtists = countries.filter((c) => c.top_artists.length > 0)
+  if (withArtists.length === 0) return DEFAULT_SUBTITLE
+
+  const country = withArtists[Math.floor(Math.random() * withArtists.length)]
+  const pool = country.top_artists.slice(0, 3)
+  const artist = pool[Math.floor(Math.random() * pool.length)]
+  return `${artist} is topping the charts in ${country.name}.`
+}
 
 // One counter drives both lines: the title consumes the first TITLE.length
 // steps, the subtitle the rest. That is what makes them type SEQUENTIALLY at
 // one speed. Two independent counters would finish at different times because
 // the strings are different lengths, which reads as two animations fighting
 // rather than one typewriter.
-const TOTAL_CHARS = TITLE.length + SUBTITLE.length
+//
+// The total is computed per cycle now rather than being a constant, because the
+// subtitle's length changes with whichever artist is drawn.
 const TYPE_MS = 45
 const CYCLE_MS = 10_000
 
@@ -110,7 +139,16 @@ function App() {
   // Starts COMPLETE, not empty: the first paint should show the finished
   // headline rather than animating in, which would delay the page's own title
   // behind an effect.
-  const [typed, setTyped] = useState(TOTAL_CHARS)
+  const [subtitle, setSubtitle] = useState(DEFAULT_SUBTITLE)
+  const [typed, setTyped] = useState(TITLE.length + DEFAULT_SUBTITLE.length)
+  // A ref, not a dependency: the typing effect must not restart every time the
+  // country list changes identity, or the first payload landing would abort a
+  // cycle mid-word.
+  const countriesRef = useRef<CountrySummary[]>([])
+
+  useEffect(() => {
+    countriesRef.current = countries
+  }, [countries])
 
   useEffect(() => {
     let cancelled = false
@@ -154,15 +192,19 @@ function App() {
       return (current + step) % HEADLINE_FONTS.length
     })
 
+    const nextSubtitle = pickSubtitle(countriesRef.current)
+    setSubtitle(nextSubtitle)
     setTyped(0)
+
     // A local counter rather than a functional setState that clears its own
     // interval: the cleanup below is then the only place the timer is stopped,
     // so a cycle change mid-type cannot leave one running.
+    const total = TITLE.length + nextSubtitle.length
     let n = 0
     const id = window.setInterval(() => {
       n += 1
       setTyped(n)
-      if (n >= TOTAL_CHARS) window.clearInterval(id)
+      if (n >= total) window.clearInterval(id)
     }, TYPE_MS)
 
     return () => window.clearInterval(id)
@@ -170,9 +212,10 @@ function App() {
 
   const headlineFont = HEADLINE_FONTS[fontIndex]
   const typedTitle = TITLE.slice(0, Math.min(typed, TITLE.length))
-  const typedSubtitle = SUBTITLE.slice(0, Math.max(0, typed - TITLE.length))
+  const typedSubtitle = subtitle.slice(0, Math.max(0, typed - TITLE.length))
   const titleTyping = typed < TITLE.length
-  const subtitleTyping = typed >= TITLE.length && typed < TOTAL_CHARS
+  const subtitleTyping =
+    typed >= TITLE.length && typed < TITLE.length + subtitle.length
 
   // Two lineages, shown separately: chart data advances nightly, the
   // MusicBrainz mirror is a one-off import that can be weeks behind. Collapsing
