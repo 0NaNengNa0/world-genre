@@ -7,8 +7,14 @@ ruff>=0.6.0
 pycountry>=24.6.1
 # Required by fastapi.testclient (starlette imports it lazily and raises at
 # import time if it's missing), used to exercise the API through the real ASGI
-# stack in tests/test_error_handling.py.
-httpx2>=0.28.0
+# stack in tests/test_published.py.
+#
+# This said `httpx2` until 2026-09-16 - a different PyPI package entirely. The
+# suite passed anyway because that package happens to depend on httpx, so the
+# import this actually needs arrived transitively. A dependency that works by
+# accident is one upstream release away from not working, and the failure would
+# have been an ImportError in CI with no obvious cause.
+httpx>=0.27.0
 # Parses the BigQuery SQL offline so dialect errors fail in CI rather than
 # in a Cloud Run job. There is no local BigQuery emulator, so this is the
 # only way to check the .sql files without credentials and a network.
