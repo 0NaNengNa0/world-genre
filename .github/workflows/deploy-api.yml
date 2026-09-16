@@ -28,8 +28,72 @@ jobs:
   test:
     uses: ./.github/workflows/backend-ci.yml
 
+  # The third layer of SQL checking, and the only one that has seen the
+  # warehouse. backend-ci's sqlglot tests catch dialect errors offline; this
+  # catches what a parser structurally cannot - names, types and scoping
+  # resolved against the real dataset. Both production failures in the week of
+  # 2026-09-14 (a CTE output column shadowing its input in HAVING, and a CTE
+  # named `current`) parsed cleanly and failed at runtime.
+  #
+  # A SEPARATE JOB, not a step in deploy: it runs in parallel with the unit
+  # tests, so it costs no extra wall-clock time on the critical path, and a SQL
+  # failure is reported as a SQL failure rather than as a failed deploy.
+  #
+  # It is NOT added to backend-ci.yml, deliberately. That workflow runs on pull
+  # requests and has no credentials by design - it is fast, offline, and works
+  # from a fork, where OIDC tokens are not issued. Putting a GCP dependency
+  # there would trade a reliable PR loop for a gate that main already has.
+  #
+  # KNOWN CONSTRAINT: the dry run resolves against the LIVE dataset, and
+  # schema.sql is applied by run_init_bq as stage one of the nightly pipeline.
+  # So a commit that adds a column AND a query reading it will fail here until
+  # the pipeline has next run. Apply the schema before merging the reader.
+  validate-sql:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      BQ_DATASET: world-genre-natt.world_genre
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-cloud.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-cloud.txt
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/411464225527/locations/global/workloadIdentityPools/github/providers/github-provider
+          service_account: github-deployer@world-genre-natt.iam.gserviceaccount.com
+
+      # Dry runs only. Nothing is executed and no bytes are scanned, so this
+      # step cannot change or cost anything - it needs bigquery.jobs.create
+      # and read access to the dataset's metadata, nothing more.
+      - name: Validate SQL against BigQuery
+        run: python -m scripts.run_validate_sql
+
+      # Catches the DDL and the warehouse disagreeing, which is what let two
+      # tables exist for weeks without the keys their CREATE declared. Runs
+      # after the dry run because a schema file that does not validate makes
+      # any drift report meaningless.
+      - name: Check for schema drift
+        run: python -m scripts.run_check_schema
+
   deploy:
-    needs: test
+    needs: [test, validate-sql]
     runs-on: ubuntu-latest
 
     permissions:
