@@ -36,22 +36,31 @@ the only thing it skips is execution itself. So validating a SELECT requires
 real query needs. `roles/bigquery.metadataViewer` grants tables.get and
 tables.list, which is enough for INFORMATION_SCHEMA and NOT enough for this.
 
-DDL is stricter still: dry-running `CREATE TABLE IF NOT EXISTS` requires
-`bigquery.tables.create` on the dataset. That is a WRITE permission, and
-granting it to a CI identity whose entire purpose is to never write is the
-wrong trade - so in CI the schema statements are skipped (see SKIP_DDL_ENV).
-Nothing is lost by that:
+And the line that matters is READ vs WRITE, not DDL vs query. Any statement
+that would modify something needs modify permission to validate:
 
-  - dialect errors in schema.sql are already caught offline by sqlglot in
-    tests/test_bigquery_sql.py,
-  - the DDL is EXECUTED nightly by run_init_bq as pipeline stage one, under a
-    service account that legitimately has write access, so a broken statement
-    fails there within a day,
+    CREATE TABLE IF NOT EXISTS   ->  bigquery.tables.create
+    MERGE INTO artists           ->  bigquery.tables.updateData
+
+Both are write permissions. This was learned twice in one evening: the schema
+statements were skipped first, and the next run still failed on
+merges/resolve_artists.sql - the same insight, applied one category too
+narrowly. Hence READ_ONLY_ENV rather than a DDL-shaped switch.
+
+Granting write access to an identity whose entire purpose is to never write is
+the wrong trade, so under READ_ONLY_ENV the writing statements are skipped.
+Nothing is lost:
+
+  - dialect errors in every .sql file, writers included, are already caught
+    offline by sqlglot in tests/test_bigquery_sql.py,
+  - schema.sql is EXECUTED nightly by run_init_bq as pipeline stage one and
+    resolve_artists.sql by run_resolve_artists, both under a service account
+    that legitimately has write access, so a broken statement fails within a
+    day and before publish,
   - and scripts/run_check_schema.py compares the declared schema against
     INFORMATION_SCHEMA using metadata reads alone.
 
-Locally, where the operator is usually project owner, DDL is validated by
-default.
+Locally, where the operator is usually project owner, everything is validated.
 
 Run locally from the backend/ directory:
     python -m scripts.run_validate_sql
@@ -76,13 +85,14 @@ EXIT_OK = 0
 EXIT_SQL_INVALID = 1
 EXIT_COULD_NOT_RUN = 2
 
-# Set to "1" in CI. An environment variable rather than an argparse flag, on
-# purpose: argparse exits 2 on a usage error, and 2 is already this script's
-# "could not run" code. run_pipeline.py had to move its check-error code off 2
-# for exactly this reason. Re-introducing the same overloaded exit status to
-# save four characters of ergonomics would be repeating a bug this repo has
-# already paid for once.
-SKIP_DDL_ENV = "VALIDATE_SQL_SKIP_DDL"
+# Set to "1" wherever the credentials can read but not write - CI, above all.
+# An environment variable rather than an argparse flag, on purpose: argparse
+# exits 2 on a usage error, and 2 is already this script's "could not run"
+# code. run_pipeline.py had to move its check-error code off 2 for exactly this
+# reason. Re-introducing the same overloaded exit status to save four
+# characters of ergonomics would be repeating a bug this repo has already paid
+# for once.
+READ_ONLY_ENV = "VALIDATE_SQL_READ_ONLY"
 
 QUERY_DIR = SQL_DIR / "bigquery" / "queries"
 CHECK_DIR = SQL_DIR / "bigquery" / "checks"
@@ -153,7 +163,7 @@ def _resolve(sql: str, dataset: str, weight_column: str | None = None) -> str:
     return sql
 
 
-def _statements_to_check(dataset: str, include_ddl: bool = True) -> list[tuple[str, str]]:
+def _statements_to_check(dataset: str, include_writes: bool = True) -> list[tuple[str, str]]:
     """(label, sql) for everything worth validating.
 
     The schema is included, not just the read queries. Its statements are the
@@ -166,13 +176,14 @@ def _statements_to_check(dataset: str, include_ddl: bool = True) -> list[tuple[s
 
     items: list[tuple[str, str]] = []
 
-    if include_ddl:
+    if include_writes:
         for i, statement in enumerate(
             statements(SCHEMA_PATH.read_text(encoding="utf-8"), dataset), 1
         ):
             items.append((f"schema.sql[{i}]", statement))
 
-    for directory in (QUERY_DIR, CHECK_DIR, MERGE_DIR):
+    readable = (QUERY_DIR, CHECK_DIR) + ((MERGE_DIR,) if include_writes else ())
+    for directory in readable:
         for path in sorted(directory.glob("*.sql")):
             raw = path.read_text(encoding="utf-8")
             label = f"{path.parent.name}/{path.name}"
@@ -187,11 +198,11 @@ def _statements_to_check(dataset: str, include_ddl: bool = True) -> list[tuple[s
     return items
 
 
-def validate(dataset: str, include_ddl: bool = True) -> list[tuple[str, str]]:
+def validate(dataset: str, include_writes: bool = True) -> list[tuple[str, str]]:
     """Dry-run everything. Returns [(label, error)] for what failed."""
     failures: list[tuple[str, str]] = []
 
-    for label, sql in _statements_to_check(dataset, include_ddl):
+    for label, sql in _statements_to_check(dataset, include_writes):
         try:
             params = _params_for(sql)
         except KeyError as e:
@@ -223,15 +234,17 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("%s", e)
         return EXIT_COULD_NOT_RUN
 
-    include_ddl = os.environ.get(SKIP_DDL_ENV, "") != "1"
+    include_writes = os.environ.get(READ_ONLY_ENV, "") != "1"
     logger.info(
         "Dry-running %s against %s",
-        "every statement" if include_ddl else "queries/checks/merges (DDL skipped)",
+        "every statement"
+        if include_writes
+        else "read-only statements (schema + merges skipped: no write access)",
         dataset,
     )
 
     try:
-        failures = validate(dataset, include_ddl)
+        failures = validate(dataset, include_writes)
     except Exception as e:
         # Could not reach BigQuery at all - missing credentials, no network,
         # no such dataset. Not the same as "the SQL is wrong", and a caller

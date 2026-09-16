@@ -59,14 +59,18 @@ jobs:
     env:
       BQ_DATASET: world-genre-natt.world_genre
       # A dry run performs the FULL authorization check - it skips execution,
-      # not permissions. Validating the DDL therefore needs
-      # bigquery.tables.create on the dataset, which is a WRITE permission on a
-      # identity whose whole job is to never write. Skipped here instead.
-      # schema.sql is still covered: sqlglot parses it offline in
-      # tests/test_bigquery_sql.py, run_init_bq executes it nightly under the
-      # pipeline's own service account, and run_check_schema compares it to
-      # INFORMATION_SCHEMA using metadata reads alone.
-      VALIDATE_SQL_SKIP_DDL: "1"
+      # not permissions. So validating a statement that WRITES needs write
+      # permission: CREATE TABLE needs bigquery.tables.create, and the MERGE in
+      # resolve_artists.sql needs bigquery.tables.updateData. Granting either to
+      # an identity whose whole job is to never touch the warehouse is the wrong
+      # trade, so the writers are skipped and this account holds only
+      # jobUser + dataViewer.
+      #
+      # They stay covered: sqlglot parses every .sql offline in
+      # tests/test_bigquery_sql.py, run_init_bq and run_resolve_artists execute
+      # them nightly under the pipeline's own service account, and
+      # run_check_schema compares declared-vs-actual using metadata alone.
+      VALIDATE_SQL_READ_ONLY: "1"
 
     steps:
       - uses: actions/checkout@v4

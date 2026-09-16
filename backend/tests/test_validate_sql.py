@@ -71,23 +71,33 @@ class TestStatementCollection:
         assert any("[score]" in v for v in variants)
         assert any("[distinctiveness]" in v for v in variants)
 
-    def test_ddl_can_be_skipped(self):
-        """CI skips the schema statements, and it must skip ONLY those.
+    def test_read_only_mode_skips_every_writer(self):
+        """Read-only credentials must skip BOTH kinds of writing statement.
 
-        Dry-running DDL needs bigquery.tables.create - a write permission on an
-        identity that exists to never write. Everything else still runs, so a
-        regression that quietly dropped the queries too would defeat the gate
-        while still reporting green.
+        This was got wrong once: only the DDL was skipped, and the next run
+        failed on the MERGE, which needs bigquery.tables.updateData for exactly
+        the same reason CREATE TABLE needs tables.create. The axis is
+        read-vs-write, not DDL-vs-query.
         """
-        labels = [label for label, _ in _statements_to_check("p.d", include_ddl=False)]
+        labels = [label for label, _ in _statements_to_check("p.d", include_writes=False)]
         assert not any(label.startswith("schema.sql") for label in labels)
-        for prefix in ("queries/", "checks/", "merges/"):
+        assert not any(label.startswith("merges/") for label in labels)
+
+    def test_read_only_mode_still_validates_the_readers(self):
+        """The half that catches real bugs must survive the skip.
+
+        A regression that quietly dropped the queries too would defeat the gate
+        while still reporting green - the worst possible failure for a check.
+        """
+        labels = [label for label, _ in _statements_to_check("p.d", include_writes=False)]
+        for prefix in ("queries/", "checks/"):
             assert any(label.startswith(prefix) for label in labels), prefix
 
-    def test_skipping_ddl_removes_exactly_the_schema_statements(self):
-        full = len(_statements_to_check("p.d", include_ddl=True))
-        without = len(_statements_to_check("p.d", include_ddl=False))
-        assert full - without == 15
+    def test_read_only_removes_exactly_the_writers(self):
+        full = len(_statements_to_check("p.d", include_writes=True))
+        without = len(_statements_to_check("p.d", include_writes=False))
+        # 15 schema statements + 1 merge
+        assert full - without == 16
 
     def test_dataset_placeholder_is_substituted(self):
         for label, sql in _statements_to_check("p.d"):
