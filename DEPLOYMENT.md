@@ -722,6 +722,60 @@ an error that names the wrong thing:
 
 ---
 
+## Monitoring — CONFIGURED, NOT YET APPLIED
+
+Config, reasoning and the apply script live in `infra/monitoring/`. Read its
+README before changing a threshold; the short version is here.
+
+**The problem it solves.** The data-quality gate is stage twelve of thirteen.
+It runs *inside* the pipeline, so it cannot report on a pipeline that did not
+run — silence from the gate is indistinguishable from "not yet". Nothing in
+this repo could detect a paused scheduler, a deleted job, or a broken image
+tag, and this project has already had production run undocumented for weeks
+for exactly that reason.
+
+**Two policies, watching different failures:**
+
+| Policy | Fires when | Latency | Blind to |
+| --- | --- | --- | --- |
+| `World Genre pipeline - execution failed` | an execution finishes `result=failed` | ~10 min | a run that never started |
+| `World Genre pipeline - no successful run in 30h` | no completion logged for 30h | up to 30h | which stage broke |
+
+The second is the important one and works by **absence**: completions summed
+over a trailing 24h must be >= 1, and falling below that for 6h fires the
+alert. Alignment period plus duration is the real staleness budget — 24h + 6h =
+30h since the last completion — and it is built that way because a condition's
+`duration` is capped at 24 hours, so any window longer than a day has to be
+composed. `evaluationMissingData: EVALUATION_MISSING_DATA_ACTIVE` is what makes
+it an absence alarm: without it the condition never evaluates once the metric
+stops reporting, which is exactly the state being detected.
+
+PromQL's `absent_over_time` was the first attempt and is rejected — log-based
+metrics cap PromQL lookback at 1d1h, leaving one hour of jitter tolerance.
+30 hours rather than 24 because consecutive completions sit ~24h apart and a
+24h budget would alarm on an ordinary slow run.
+
+**The signal** is the last line `run_pipeline` logs on success, emitted only
+after every stage returned *and* the gate allowed the publish — so the metric
+means "a complete, publishable run finished", not "the container exited".
+Cloud Run's own success metric cannot make that distinction; it would tick for
+`--only publish`. The coupling to a log string is pinned by
+`TestCompletionLineIsAMonitoringContract` in `backend/tests/test_run_pipeline.py`,
+so renaming the line fails CI rather than silently disabling the alert.
+
+```powershell
+cd infra\monitoring
+.\apply.ps1                    # re-runnable: updates in place, never duplicates
+
+gcloud alpha monitoring policies list --project=world-genre-natt --format="table(displayName,enabled)"
+```
+
+A policy created without a notification channel looks configured, shows red in
+the console, and tells nobody — `apply.ps1` refuses to create one rather than
+warn.
+
+---
+
 ## Tearing down
 
 ```powershell

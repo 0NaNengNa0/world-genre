@@ -1,0 +1,33 @@
+# A counter that ticks once per SUCCESSFUL end-to-end pipeline run.
+#
+# The point of this metric is not the count. It is that the count STOPS.
+# Everything else watching this pipeline is inside it - the data-quality gate
+# runs as stage twelve of thirteen, so it can only ever report on a run that
+# happened. A run that never started, a scheduler that was paused and never
+# resumed, a job whose image was deleted: the gate is silent on all of them,
+# because silence is indistinguishable from "not yet" when the observer lives
+# in the thing being observed.
+#
+# So the signal is deliberately the LAST line run_pipeline prints:
+#
+#     logger.info("pipeline done in %ds (%d stages)", ...)
+#
+# It is emitted only after every stage returned and the gate allowed the
+# publish. A run that crashed in stage three, or that the gate blocked, never
+# logs it - which is intended. This metric answers "did a complete, publishable
+# run finish", not "did the container start".
+#
+# Matching on the message text couples this to a log line, which is a fair
+# objection. The alternative - the job's own completed_execution_count metric -
+# counts an execution that ran every stage and one that ran `--only publish`
+# as the same event, and cannot see the gate's verdict at all. A structured
+# log field would be the better version of this; the text match is the version
+# that ships today. There is a test asserting the line's format lives on in
+# run_pipeline, so a rename breaks CI rather than the alert.
+description: >-
+  One data point per successful end-to-end run of the World Genre pipeline.
+  Alerted on by ABSENCE, not by value - see infra/monitoring/README.md.
+filter: |-
+  resource.type="cloud_run_job"
+  resource.labels.job_name="world-genre-pipeline"
+  textPayload:"pipeline done in"

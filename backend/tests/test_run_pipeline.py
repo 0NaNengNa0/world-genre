@@ -144,3 +144,47 @@ class TestRunOrder:
         fake = FakeStages(monkeypatch, {"load": None, "validate": 1, "publish": None})
         assert run_pipeline.main(["--only", "publish"]) == 0
         assert fake.ran == ["publish"]
+
+
+class TestCompletionLineIsAMonitoringContract:
+    """The success line is a production signal, not just a log message.
+
+    infra/monitoring/pipeline_completed.yaml builds a log-based metric by
+    matching the text "pipeline done in", and the staleness alert fires when
+    that metric stops appearing for 30 hours. So renaming the line does not
+    break a log - it silently disables the only thing watching for a pipeline
+    that never ran, and disables it in the direction that looks healthy: no
+    metric, no data points, and an absence alert that has nothing to compare
+    against.
+
+    Matching on log text is a coupling worth being honest about. This test is
+    the compensating control: the string lives in two repos-worth of places,
+    so pin it here and a rename fails CI instead of failing silently in
+    production six weeks later.
+    """
+
+    SIGNAL = "pipeline done in"
+
+    def test_the_signal_string_is_emitted_on_success(self, monkeypatch, caplog):
+        FakeStages(monkeypatch, {"load": None, "validate": 0, "publish": None})
+        with caplog.at_level("INFO", logger="run_pipeline"):
+            assert run_pipeline.main([]) == 0
+        assert any(self.SIGNAL in r.getMessage() for r in caplog.records), (
+            "the completion line changed - update "
+            "infra/monitoring/pipeline_completed.yaml in the same commit"
+        )
+
+    def test_it_is_not_emitted_when_the_gate_blocks(self, monkeypatch, caplog):
+        # The metric must mean "a complete, publishable run finished", not
+        # "the container exited". A blocked gate is a run whose output nobody
+        # should treat as fresh, so it must not tick the freshness counter.
+        FakeStages(monkeypatch, {"load": None, "validate": 1, "publish": None})
+        with caplog.at_level("INFO", logger="run_pipeline"):
+            assert run_pipeline.main([]) == 1
+        assert not any(self.SIGNAL in r.getMessage() for r in caplog.records)
+
+    def test_it_is_not_emitted_when_a_stage_raises(self, monkeypatch, caplog):
+        FakeStages(monkeypatch, {"load": RuntimeError("boom"), "validate": 0})
+        with caplog.at_level("INFO", logger="run_pipeline"):
+            assert run_pipeline.main([]) == 1
+        assert not any(self.SIGNAL in r.getMessage() for r in caplog.records)

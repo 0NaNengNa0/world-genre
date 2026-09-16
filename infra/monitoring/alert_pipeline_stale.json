@@ -1,0 +1,30 @@
+{
+  "displayName": "World Genre pipeline - no successful run in 30h",
+  "documentation": {
+    "content": "No 'pipeline done' line has been logged for ~30 hours, so the warehouse and the published JSON are both at least a day stale.\n\nThis is the SLOW alarm, and it catches the failures nothing else can: the scheduler paused and never resumed, the job deleted, the image tag broken, a run that hangs past its timeout. None of those produce a failed execution, so the fast alert stays green through all of them.\n\nFirst move: gcloud run jobs executions list --job=world-genre-pipeline --region=asia-southeast3 --limit=5 and gcloud scheduler jobs list --location=asia-southeast1\n\nIf the scheduler is paused because someone was running the pipeline by hand, resume it: that is the single most likely cause.",
+    "mimeType": "text/markdown"
+  },
+  "combiner": "OR",
+  "conditions": [
+    {
+      "displayName": "no completion in the trailing 24h, sustained 6h",
+      "conditionThreshold": {
+        "filter": "metric.type = \"logging.googleapis.com/user/world_genre_pipeline_completed\" AND resource.type = \"cloud_run_job\"",
+        "aggregations": [
+          {
+            "alignmentPeriod": "86400s",
+            "perSeriesAligner": "ALIGN_SUM",
+            "crossSeriesReducer": "REDUCE_SUM"
+          }
+        ],
+        "comparison": "COMPARISON_LT",
+        "thresholdValue": 1,
+        "duration": "21600s",
+        "trigger": { "count": 1 },
+        "evaluationMissingData": "EVALUATION_MISSING_DATA_ACTIVE"
+      }
+    }
+  ],
+  "alertStrategy": { "autoClose": "604800s" },
+  "notificationChannels": ["__CHANNEL__"]
+}

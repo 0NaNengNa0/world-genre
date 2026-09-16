@@ -141,20 +141,61 @@ def merge_dimension(
     bigquery = _require_bigquery()
     client = get_client()
 
+    columns = list(rows[0].keys())
+
+    # THE STAGING TABLE BORROWS THE TARGET'S SCHEMA. It used to autodetect,
+    # and that is a bug with a long fuse.
+    #
+    # BigQuery infers a column's type from the values in the batch, and a
+    # column whose values are ALL NULL is inferred as STRING. `artists`
+    # declares formed_year INT64, so the night MusicBrainz returned no
+    # formation year for a single artist in the batch, the staging table came
+    # out STRING and the MERGE failed with:
+    #
+    #     Value of type STRING cannot be assigned to T.formed_year,
+    #     which has type INT64
+    #
+    # It had worked every previous night. Nothing in the code changed; the
+    # DATA changed. That is the whole hazard of schema inference on a batch -
+    # the type of a table becomes a function of a sample, so an unlucky
+    # sample is a type error, and the unlucky sample arrives eventually.
+    #
+    # Reading the schema from the target instead makes the staging table's
+    # types a function of the DECLARED schema, which is what the MERGE is
+    # checked against. It also turns "this column does not exist yet" into a
+    # clear error naming run_init_bq, rather than a load that succeeds and a
+    # MERGE that fails on an unrecognised name thirty seconds later.
+    target = client.get_table(f"{dataset_id()}.{table}")
+    declared = {field.name: field for field in target.schema}
+    unknown = [c for c in columns if c not in declared]
+    if unknown:
+        raise ValueError(
+            f"{table} has no column(s) {unknown} - schema.sql and the warehouse "
+            f"disagree. Run `python -m scripts.run_init_bq`."
+        )
+
+    # NULLABLE regardless of how the target declares it: a staging batch
+    # legitimately carries nulls for columns this writer does not own. The
+    # target's own REQUIRED constraints still apply when the MERGE inserts.
+    staging_schema = [
+        bigquery.SchemaField(c, declared[c].field_type, mode="NULLABLE")
+        for c in columns
+    ]
+
     # A real table rather than a temporary one, because BigQuery's temp tables
     # are scoped to a multi-statement script and this is two separate jobs.
-    # WRITE_TRUNCATE makes it self-cleaning on each run.
+    # WRITE_TRUNCATE makes it self-cleaning on each run, and replaces the
+    # schema too, so a column added to the target is picked up next run.
     client.load_table_from_json(
         rows,
         f"{dataset_id()}.{staging}",
         job_config=bigquery.LoadJobConfig(
             source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
             write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
-            autodetect=True,
+            schema=staging_schema,
+            autodetect=False,
         ),
     ).result()
-
-    columns = list(rows[0].keys())
     insert_cols = ", ".join(columns)
     insert_vals = ", ".join(f"S.{c}" for c in columns)
 
