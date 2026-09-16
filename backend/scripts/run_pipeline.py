@@ -34,7 +34,8 @@ EXIT CODES, which the job's retry policy acts on:
 
     0  every stage succeeded and the gate passed
     1  a stage raised, or the gate failed on the data (deterministic)
-    2  the gate could not run - transient, and the one case worth retrying
+    2  argparse usage error - NOT ours, and never worth retrying
+    3  the gate could not run - transient, and the one case worth retrying
 
 Note the job is currently configured with maxRetries=1, which means a
 deterministic gate failure costs a second full 36-minute run to learn the same
@@ -57,7 +58,16 @@ logger = logging.getLogger("run_pipeline")
 
 EXIT_OK = 0
 EXIT_FAILED = 1
-EXIT_CHECK_ERROR = 2
+# 3, NOT 2, and the gap is deliberate. argparse exits 2 on a usage error, so
+# a driver that also used 2 for "the gate could not run" would give an
+# operator - and the job's retry policy - no way to tell a transient check
+# failure (worth retrying) from a malformed command line (never worth
+# retrying). That ambiguity cost a debugging session on 2026-09-16: a stage
+# parsing the driver's own argv exited 2 and read as a gate error.
+#
+# run_validate keeps its own 0/1/2 contract; this driver translates.
+EXIT_CHECK_ERROR = 3
+VALIDATE_CHECK_ERROR = 2
 
 
 @dataclass(frozen=True)
@@ -69,6 +79,18 @@ class Stage:
     # The gate returns an exit code instead of raising, because "the data is
     # wrong" is not an exception - it is a verdict. Handled separately below.
     gate: bool = False
+    # Its main() is main(argv) and reads sys.argv when argv is None, so it
+    # MUST be called with [] explicitly.
+    #
+    # This used to be implied by `gate`, and the two are not the same thing.
+    # run_resolve_artists has an argv signature (for --dry-run) and is not a
+    # gate, so it was called as main() and argparse inside it parsed THIS
+    # script's arguments - rejecting `--from load` with argparse's own exit
+    # code 2. One flag standing for two unrelated properties is how a new
+    # stage inherits the wrong half of it. test_run_pipeline.py now checks
+    # every stage's real signature against this field, so a mismatch fails in
+    # CI rather than in a Cloud Run job.
+    takes_argv: bool = False
 
 
 STAGES: list[Stage] = [
@@ -86,13 +108,13 @@ STAGES: list[Stage] = [
     # stage rather than instead of it. Everything this resolves is an artist
     # enrich_artists never has to spend a rate-limited request on, so its
     # position here - after load, before enrichment - is the whole saving.
-    Stage("resolve_artists", "scripts.run_resolve_artists"),
+    Stage("resolve_artists", "scripts.run_resolve_artists", takes_argv=True),
     # The long pole: ~22 minutes of the ~36 minute run, and it resolves only
     # tens of artists per night because MusicBrainz rate-limits per IP and
     # serverless egress shares its addresses. See DEPLOYMENT.md.
     Stage("enrich_artists", "scripts.run_extract_artist_meta"),
     Stage("enrich_genres", "scripts.run_extract_genre_info"),
-    Stage("validate", "scripts.run_validate", gate=True),
+    Stage("validate", "scripts.run_validate", gate=True, takes_argv=True),
     Stage("publish", "scripts.run_publish"),
 ]
 
@@ -131,11 +153,10 @@ def run_stage(stage: Stage) -> int | None:
     started = time.monotonic()
     main = importlib.import_module(stage.module).main
 
-    # The gate's main() takes an argv list and reads sys.argv when given None.
-    # Passing [] explicitly is required: without it, argparse inside
-    # run_validate would try to parse THIS script's arguments and reject
-    # `--from load` as unrecognised.
-    result = main([]) if stage.gate else main()
+    # [] rather than nothing for any stage whose main() takes argv: given
+    # None, argparse falls back to sys.argv and parses THIS script's
+    # arguments, rejecting `--from load` as unrecognised.
+    result = main([]) if stage.takes_argv else main()
 
     logger.info("%s done in %ds", stage.name, round(time.monotonic() - started))
     return result
@@ -181,7 +202,9 @@ def main(argv: list[str] | None = None) -> int:
                 "serving the previous run's payloads",
                 result,
             )
-            return EXIT_CHECK_ERROR if result == EXIT_CHECK_ERROR else EXIT_FAILED
+            return (
+                EXIT_CHECK_ERROR if result == VALIDATE_CHECK_ERROR else EXIT_FAILED
+            )
 
     logger.info(
         "pipeline done in %ds (%d stages)",

@@ -132,11 +132,13 @@ class TestRunOrder:
         # holds the previous run's payloads.
         assert fake.ran == ["load", "validate"]
 
-    def test_a_gate_that_could_not_run_exits_two(self, monkeypatch):
-        # Preserved end to end so the job's retry policy can tell a transient
-        # failure from a deterministic one.
+    def test_a_gate_that_could_not_run_exits_three(self, monkeypatch):
+        # Translated, not preserved: run_validate's own contract is 0/1/2, but
+        # 2 is argparse's usage-error code, so the driver reports 3. The job's
+        # retry policy can then tell a transient check failure from a bad
+        # command line - see TestExitCodesDoNotCollideWithArgparse.
         FakeStages(monkeypatch, {"load": None, "validate": 2, "publish": None})
-        assert run_pipeline.main([]) == 2
+        assert run_pipeline.main([]) == 3
 
     def test_only_publish_skips_the_gate_entirely(self, monkeypatch):
         # Deliberate: --only is an operator escape hatch for re-running one
@@ -188,3 +190,63 @@ class TestCompletionLineIsAMonitoringContract:
         with caplog.at_level("INFO", logger="run_pipeline"):
             assert run_pipeline.main([]) == 1
         assert not any(self.SIGNAL in r.getMessage() for r in caplog.records)
+
+
+class TestStageFlagsMatchTheRealSignatures:
+    """`takes_argv` must agree with each stage module's actual main().
+
+    This is the structural fix for a bug that reached production on
+    2026-09-16. run_resolve_artists was added with main(argv=None) - an argv
+    signature, for --dry-run - but without the flag that says so, because the
+    flag was called `gate` and resolve is not a gate. run_pipeline therefore
+    called it as main(), argparse fell back to sys.argv, and the stage
+    rejected the DRIVER's `--from load` as an unrecognised argument.
+
+    Reading the declaration against the reality is the only check that scales:
+    any future stage whose main() grows or loses a parameter fails here, in
+    CI, in a second - instead of at 03:00 in a Cloud Run job, and only on the
+    runs that happen to pass an argument at all.
+    """
+
+    @pytest.mark.parametrize("stage", STAGES, ids=lambda s: s.name)
+    def test_declared_flag_matches_the_function(self, stage):
+        import importlib
+        import inspect
+
+        main = importlib.import_module(stage.module).main
+        accepts_argv = bool(inspect.signature(main).parameters)
+        assert stage.takes_argv == accepts_argv, (
+            f"{stage.name}: main() "
+            f"{'takes' if accepts_argv else 'takes no'} arguments but "
+            f"takes_argv={stage.takes_argv}. Given None, argparse reads "
+            f"sys.argv and parses run_pipeline's own flags."
+        )
+
+    def test_the_gate_also_takes_argv(self):
+        # Not implied - asserted. The gate is called with [] for the same
+        # reason, and losing that would reintroduce the original bug in the
+        # one stage whose failure is hardest to read.
+        gate = [s for s in STAGES if s.gate]
+        assert gate and all(s.takes_argv for s in gate)
+
+
+class TestExitCodesDoNotCollideWithArgparse:
+    """2 belongs to argparse. Ours is 3.
+
+    A driver that used 2 for "the gate could not run" gives an operator no
+    way to tell a transient check failure - worth one retry - from a
+    malformed command line, which is worth none. The job runs with
+    maxRetries=1, so that ambiguity is a wasted 30-minute run.
+    """
+
+    def test_check_error_is_not_two(self):
+        assert run_pipeline.EXIT_CHECK_ERROR == 3
+
+    def test_a_gate_that_could_not_run_is_translated(self, monkeypatch):
+        # run_validate keeps its own 0/1/2 contract; the driver maps it.
+        FakeStages(monkeypatch, {"load": None, "validate": 2, "publish": None})
+        assert run_pipeline.main([]) == 3
+
+    def test_a_gate_that_failed_on_data_is_still_one(self, monkeypatch):
+        FakeStages(monkeypatch, {"load": None, "validate": 1, "publish": None})
+        assert run_pipeline.main([]) == 1
