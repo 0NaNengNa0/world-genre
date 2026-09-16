@@ -109,13 +109,19 @@ shares AS (
     JOIN window_ends w ON w.country_code = cgs.country_code
     WHERE cgs.snapshot_date IN (w.latest_date, w.baseline_date)
 ),
-current AS (
+-- NOT named `current` and `prior`. CURRENT is a RESERVED KEYWORD in BigQuery
+-- (it opens CURRENT_DATE, CURRENT_TIMESTAMP, and the CURRENT ROW window
+-- frame), so a CTE called `current` fails with "Expected keyword SELECT but
+-- got keyword CURRENT". sqlglot parses it without complaint - reserved-word
+-- collisions are a dialect fact, not a syntax one, which is why the offline
+-- parser cannot catch them and a BigQuery dry run can.
+latest_shares AS (
     SELECT s.*
     FROM shares s
     JOIN window_ends w
       ON w.country_code = s.country_code AND w.latest_date = s.snapshot_date
 ),
-prior AS (
+baseline_shares AS (
     SELECT s.*
     FROM shares s
     JOIN window_ends w
@@ -130,8 +136,8 @@ paired AS (
         COALESCE(c.share, 0) AS share,
         COALESCE(p.share, 0) AS previous_share,
         COALESCE(c.share, 0) - COALESCE(p.share, 0) AS delta
-    FROM current c
-    FULL OUTER JOIN prior p
+    FROM latest_shares c
+    FULL OUTER JOIN baseline_shares p
       ON p.country_code = c.country_code AND p.genre = c.genre
 ),
 ranked AS (

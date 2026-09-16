@@ -182,10 +182,22 @@ class TestParseArtistFromChartRow:
             == "Fuerza Regida"
         )
 
-    def test_spaced_separator_wins_so_hyphenated_names_survive(self):
-        # " - " is tried first precisely so hyphenated artist names aren't
-        # truncated when the row is well-formed.
-        assert parse_artist_from_chart_row("Jay-Z - 99 Problems") == "Jay-Z"
+    def test_a_suffixed_title_does_not_become_part_of_the_artist(self):
+        # The row that exposed this: the " - " before "Remastered" is a title
+        # suffix, not a separator. Preferring " - " split there and invented
+        # the artist "Oasis-Wonderwall", which charted in 32 countries
+        # carrying 250M streams credited to nobody real.
+        assert parse_artist_from_chart_row("Oasis-Wonderwall - Remastered") == "Oasis"
+
+    def test_hyphenated_artist_names_are_truncated(self):
+        # A KNOWN LIMITATION, pinned so it stays a decision. "Jay-Z" and
+        # "Oasis-Wonderwall" are the same shape and no rule over the raw
+        # string separates them - only knowledge of real artist names does.
+        #
+        # This was equally true before the separator order changed: kworb
+        # never writes " - " between artist and title, so the spaced branch
+        # never protected hyphenated names. It only ever fired on suffixes.
+        assert parse_artist_from_chart_row("Jay-Z-99 Problems") == "Jay"
 
     def test_row_with_no_separator_returned_as_is(self):
         assert parse_artist_from_chart_row("Radiohead") == "Radiohead"

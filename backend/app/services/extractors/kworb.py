@@ -78,14 +78,15 @@ def parse_chart_entry(row: list[str]) -> dict | None:
     if not artist:
         return None
 
-    # Everything after the first separator is the track title. Falls back to
-    # the whole label when there's no separator at all, which is rare but
-    # happens for single-word entries.
-    track = None
-    for separator in (" - ", "-"):
-        if separator in label:
-            track = label.split(separator, 1)[1].strip()
-            break
+    # Everything after the first bare hyphen is the track title, mirroring
+    # parse_artist_from_chart_row exactly. The two MUST use the same rule: a
+    # split at a different position on each side would hand the same word to
+    # both the artist and the track. Falls back to None when there is no
+    # separator at all, which happens for single-word entries.
+    #
+    # Note this keeps suffixes on the title where they belong -
+    # 'Oasis-Wonderwall - Remastered' gives track 'Wonderwall - Remastered'.
+    track = label.split("-", 1)[1].strip() if "-" in label else None
 
     def cell(index: int) -> str | None:
         return row[index] if len(row) > index else None

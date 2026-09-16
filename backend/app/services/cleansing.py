@@ -120,25 +120,48 @@ def normalize_genre(raw: str | None) -> str | None:
 def parse_artist_from_chart_row(row_label: str | None) -> str | None:
     """Pulls the artist out of a kworb chart-row label.
 
-    kworb writes rows as "Artist - Song", but inconsistently: plenty use no
-    spaces around the dash ("BTS-NORMAL", "ATEEZ-BAD"). Splitting only on
-    " - " leaves those as one string, which then matches nothing in Deezer
-    or MusicBrainz - that's where mangled entries like
-    "Fuerza Regida-COQUETA(w/Grupo Frontera)" came from.
+    kworb writes rows as "Artist-Title" with a BARE hyphen and no spaces:
 
-    Known limitation: with no spaces there's no way to tell "BTS-NORMAL"
-    (artist-song) from a hyphenated artist name, so "Jay-Z-Song" yields
-    "Jay". This path is only a fallback for countries Last.fm has no data
-    for, and a truncated artist beats an unmatched one, but the real fix for
-    an affected country is getting its Last.fm name right (see
-    scripts/generate_countries_seed.py).
+        'Olivia Dean-Man I Need'
+        'The Killers-Mr. Brightside'
+        'Sam Fender-Rein Me In(w/Olivia Dean)'
+
+    That is the only separator it uses between artist and title - measured
+    across a full chart page, 100 labels, zero exceptions.
+
+    WHY " - " IS NOT TRIED FIRST ANY MORE. It used to be, on the assumption
+    that the spaced form was the canonical one and the bare hyphen a sloppy
+    variant. It is the other way round. A spaced " - " appears only INSIDE a
+    title, as a suffix:
+
+        'Oasis-Wonderwall - Remastered'
+
+    Preferring " - " split that at the suffix and produced the artist
+    "Oasis-Wonderwall", which exists nowhere, matches nothing in MusicBrainz
+    or Deezer, and charted in 32 countries carrying 250M streams that were
+    therefore credited to no real artist. 7 of 100 labels on one chart page
+    had this shape - concentrated in catalogue tracks, which are exactly the
+    ones that chart in many countries at once.
+
+    Reordering costs nothing that was not already lost. A hyphenated artist
+    name is still truncated ("Jay-Z-99 Problems" -> "Jay"), but it was
+    truncated before this change too: kworb never puts " - " between artist
+    and title, so the spaced branch never protected those names - it only
+    ever fired on suffixes. The known limitation is unchanged; the bug that
+    sat behind it is gone.
+
+    Fixing the truncation properly needs an oracle rather than a rule, since
+    "Oasis-Wonderwall" and "Jay-Z" are the same shape and only knowledge of
+    real artist names separates them. mb_artist_names now holds 3.5M of them,
+    which is the obvious next step and deliberately not this change.
     """
     if not row_label:
         return None
-    for separator in (" - ", "-"):
-        if separator in row_label:
-            return row_label.split(separator, 1)[0].strip() or None
-    return row_label.strip() or None
+    # First bare hyphen, whatever surrounds it. Everything before it is the
+    # artist; " - " is a substring of "-", so this handles the spaced form
+    # too - it just no longer PREFERS it.
+    head = row_label.split("-", 1)[0]
+    return head.strip() or None
 
 
 def normalize_artist_name(raw: str | None) -> str | None:
