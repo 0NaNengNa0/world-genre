@@ -437,9 +437,17 @@ def main() -> None:
                 {
                     "country_code": r["country_code"],
                     "genre": r["genre"],
+                    # Raw counts are kept for context. `delta` is NOT their
+                    # difference - it is the change in share, in percentage
+                    # points, which is what the ranking is by. See the header
+                    # of trending_genres.sql for why.
                     "score": r["score"],
                     "previous_score": r["previous_score"],
+                    "share": r["share"],
+                    "previous_share": r["previous_share"],
                     "delta": r["delta"],
+                    "snapshot_date": r["snapshot_date"],
+                    "previous_date": r["previous_date"],
                 }
                 for r in trending
             ]

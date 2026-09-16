@@ -11,17 +11,23 @@ For setup see [README.md](README.md); for infrastructure see
 ## Shape
 
 ```
-extract ──→ data lake ──→ cleanse ──→ warehouse ──→ publish ──→ serve
- (5 APIs)     GCS          local       BigQuery       GCS      Cloud Run
+extract ─→ data lake ─→ cleanse ─→ warehouse ─→ resolve ─→ enrich ─→ validate ─→ publish ─→ serve
+(5 APIs)      GCS        local     BigQuery      SQL join    API       GATE        GCS     Cloud Run
 ```
 
-Six stages, each with a single job. Extractors only fetch and cache — nothing
-in them knows what a genre score is. Cleansing is pure computation over local
-files. The warehouse holds facts. Publishing turns facts into API payloads.
-Serving is a file read.
+Each stage has a single job. Extractors only fetch and cache — nothing in them
+knows what a genre score is. Cleansing is pure computation over local files.
+The warehouse holds facts. Resolution and enrichment fill in artist origin,
+cheaply then expensively. Validation decides whether the day may be served.
+Publishing turns facts into API payloads. Serving is a file read.
 
-That separation is what makes the pipeline restartable at any stage, which
-matters when one stage takes 33 minutes.
+That separation is what makes the pipeline restartable at any stage
+(`run_pipeline --from load`), which matters when one stage takes 25 minutes.
+
+**Validation sits between the warehouse and publish, not after it.** That
+ordering is called write-audit-publish, and it is only available because the
+warehouse is not the serving layer: bad data can land in BigQuery and simply
+never be published, so a failed run degrades to stale rather than to wrong.
 
 ---
 
@@ -84,7 +90,8 @@ numbers were just wrong.
 
 ## Warehouse
 
-Nine BigQuery tables. One fact table, the rest dimensional or derived.
+Thirteen BigQuery tables. One fact table, the rest dimensional, derived, or
+mirrors of an external source.
 
 `chart_entries` is the fact table: one row per track per country per day,
 carrying **measured** quantities — streams — rather than scores this project

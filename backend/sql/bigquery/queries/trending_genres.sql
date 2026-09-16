@@ -1,89 +1,161 @@
--- Genre score deltas between each country's two most recent load dates.
--- Wired up at GET /api/genres/trending (app/api/routes/genres.py), published
--- to genres-trending.json. Kept in its own file rather than as a Python
--- string so it is directly runnable:
+-- Which genres are gaining or losing ground in each country, week over week.
+-- Wired up at GET /api/genres/trending, published to genres-trending.json.
 --
---     bq query --use_legacy_sql=false --dataset_id=PROJECT:world_genre < this
+-- WHAT THIS MEASURES, and why it changed on 2026-09-16.
 --
--- Needs at least two distinct snapshot_dates per country to return anything,
--- so with one day of history it legitimately returns zero rows.
+-- The first version compared each country's two most recent snapshots and
+-- ranked by the change in raw score. Measured against real data it produced
+-- this, across every country and every genre:
 --
--- SYMMETRIC BY CONSTRUCTION, and it was not always. This query used to end
--- `ORDER BY delta DESC LIMIT 50`, which takes the fifty largest RISES and
--- nothing else - fallers sort to the bottom and were cut off on every single
--- run. The Trends view had therefore never shown a falling genre in its life.
--- Nothing errored, no test failed, and the page looked populated, which is why
--- it went unnoticed: a LIMIT over a signed quantity silently picks a side.
+--     delta distribution:  {-1: 1,  0: 24,  +1: 25}
 --
--- Taking the top N of each direction keeps the payload the same size and the
--- same shape, so the serving layer needed no change.
-WITH latest_two_dates AS (
-    -- DENSE_RANK, not ROW_NUMBER: if every country loaded on the same two
-    -- calendar dates (the normal case), this still ranks per-country
-    -- correctly even though the underlying dates are shared across rows.
-    SELECT DISTINCT
-        country_code,
-        snapshot_date,
-        DENSE_RANK() OVER (
-            PARTITION BY country_code ORDER BY snapshot_date DESC
-        ) AS recency
+-- Nothing moved. Not because the charts are static - 82-87% of (country,
+-- position) slots change track day over day - but because those swaps happen
+-- mostly WITHIN the same genres. A country's top 200 turns over substantially
+-- while its genre mix stays nearly identical, so a day-over-day delta on a
+-- coarse integer count was measuring rounding.
+--
+-- Two changes, each fixing a different defect:
+--
+-- 1. A SEVEN-DAY WINDOW instead of yesterday. The signal is real at this scale
+--    and invisible at one day. "Trending this week" is also a more honest
+--    claim than "trending since yesterday" for a chart that updates daily.
+--
+-- 2. SHARE, not raw count. Ranking by absolute change made `ie rock 220->219`
+--    rank alongside a small genre doubling, because a big genre in a big
+--    market moves more points for the same underlying nothing. Share - each
+--    genre as a percentage of its country's total - makes a small market and
+--    a large one comparable, which is the only way a cross-country ranking
+--    means anything. `delta` is therefore in PERCENTAGE POINTS.
+--
+-- A third defect is fixed by the FULL OUTER JOIN below: a genre that vanished
+-- from a country had no row in the latest snapshot, so the old LAG() never
+-- paired it and it could not appear - even though disappearing is the largest
+-- fall available. Absence is now read as zero share, which is what it means
+-- here: country_genre_scores carries a row only for genres actually present.
+WITH dates AS (
+    SELECT country_code, snapshot_date
     FROM `{dataset}.country_genre_scores`
+    GROUP BY country_code, snapshot_date
 ),
-scored_with_previous AS (
+window_candidates AS (
+    -- Per country, not globally: countries do not all load on the same days,
+    -- and a country that missed a run should be compared against its own
+    -- history rather than against a date it has no data for.
+    --
+    -- l.latest_date is in the GROUP BY rather than aggregated. It is
+    -- functionally dependent on country_code, but BigQuery does not infer
+    -- that - every non-aggregated column must be grouped.
+    SELECT
+        d.country_code,
+        l.latest_date,
+        COALESCE(
+            -- The most recent snapshot at least six days older than the
+            -- latest. Six, not seven, so a run that slips by a few hours
+            -- still finds last week's rather than falling through.
+            MAX(
+                CASE
+                    WHEN d.snapshot_date
+                         <= DATE_SUB(l.latest_date, INTERVAL 6 DAY)
+                    THEN d.snapshot_date
+                END
+            ),
+            -- Less than a week of history: compare against the oldest
+            -- snapshot there is, so the view works from day two rather than
+            -- staying empty for a week.
+            MIN(CASE WHEN d.snapshot_date < l.latest_date THEN d.snapshot_date END)
+        ) AS baseline_date
+    FROM dates d
+    JOIN (
+        SELECT country_code, MAX(snapshot_date) AS latest_date
+        FROM dates
+        GROUP BY country_code
+    ) l ON l.country_code = d.country_code
+    GROUP BY d.country_code, l.latest_date
+),
+window_ends AS (
+    -- A country with exactly one snapshot has no baseline, and dropping it
+    -- here is load-bearing. Left in, its prior side would be empty, the FULL
+    -- OUTER JOIN below would read every genre as appearing from nothing, and
+    -- a brand-new country would flood the rising list on its first day. A
+    -- country with no comparison has no trend - that is a skip, not a rise.
+    --
+    -- Filtered in its own CTE rather than with HAVING: the predicate would
+    -- reference an aliased aggregate expression, and BigQuery resolves names
+    -- in HAVING against the SELECT list first. That is exactly how
+    -- merges/resolve_artists.sql failed with "Aggregations of aggregations
+    -- are not allowed".
+    SELECT * FROM window_candidates WHERE baseline_date IS NOT NULL
+),
+shares AS (
+    -- Each genre as a percentage of its country's total score on that day.
+    --
+    -- Note this cannot prune partitions: the dates come from another table, so
+    -- BigQuery scans the whole (small) table rather than two partitions. At a
+    -- few thousand rows per day that is cheaper than the machinery to avoid
+    -- it, but it would not be at a hundred times the size.
     SELECT
         cgs.country_code,
+        cgs.snapshot_date,
         cgs.genre,
         cgs.score,
-        cgs.snapshot_date,
-        LAG(cgs.score) OVER (
-            PARTITION BY cgs.country_code, cgs.genre ORDER BY cgs.snapshot_date
-        ) AS previous_score
+        SAFE_DIVIDE(
+            cgs.score,
+            SUM(cgs.score) OVER (
+                PARTITION BY cgs.country_code, cgs.snapshot_date
+            )
+        ) * 100 AS share
     FROM `{dataset}.country_genre_scores` cgs
-    JOIN latest_two_dates ltd
-      ON ltd.country_code = cgs.country_code
-     AND ltd.snapshot_date = cgs.snapshot_date
-     AND ltd.recency <= 2
+    JOIN window_ends w ON w.country_code = cgs.country_code
+    WHERE cgs.snapshot_date IN (w.latest_date, w.baseline_date)
 ),
-deltas AS (
+current AS (
+    SELECT s.*
+    FROM shares s
+    JOIN window_ends w
+      ON w.country_code = s.country_code AND w.latest_date = s.snapshot_date
+),
+prior AS (
+    SELECT s.*
+    FROM shares s
+    JOIN window_ends w
+      ON w.country_code = s.country_code AND w.baseline_date = s.snapshot_date
+),
+paired AS (
     SELECT
-        country_code,
-        genre,
-        score,
-        previous_score,
-        (score - previous_score) AS delta
-    FROM scored_with_previous
-    -- Excludes genres that are brand-new this run: they have no previous
-    -- score, so "how much did it move" has no answer. Note the mirror case is
-    -- NOT handled here - see the comment at the bottom.
-    WHERE previous_score IS NOT NULL
+        COALESCE(c.country_code, p.country_code) AS country_code,
+        COALESCE(c.genre, p.genre) AS genre,
+        COALESCE(c.score, 0) AS score,
+        COALESCE(p.score, 0) AS previous_score,
+        COALESCE(c.share, 0) AS share,
+        COALESCE(p.share, 0) AS previous_share,
+        COALESCE(c.share, 0) - COALESCE(p.share, 0) AS delta
+    FROM current c
+    FULL OUTER JOIN prior p
+      ON p.country_code = c.country_code AND p.genre = c.genre
 ),
 ranked AS (
     SELECT
         *,
+        -- Two rankings rather than one ORDER BY: `delta` is a SIGNED
+        -- quantity, and a single LIMIT over a signed quantity silently picks
+        -- a side. The previous version ended `ORDER BY delta DESC LIMIT 50`
+        -- and had therefore never once shown a falling genre.
         ROW_NUMBER() OVER (ORDER BY delta DESC) AS rising_rank,
         ROW_NUMBER() OVER (ORDER BY delta ASC) AS falling_rank
-    FROM deltas
+    FROM paired
 )
--- KNOWN ASYMMETRY, left deliberately rather than overlooked.
---
--- A genre that vanished from a country entirely has no row in the latest
--- snapshot, so LAG never produces a pair for it and it cannot appear here -
--- even though disappearing is the largest fall available. Rises have the same
--- blind spot at the other end, handled above by excluding brand-new genres so
--- at least the two sides are treated alike.
---
--- Fixing it properly means abandoning LAG for a FULL OUTER JOIN between the
--- two snapshots, treating a missing side as zero. That is a bigger change than
--- it looks: "score dropped to zero" and "we stopped measuring this genre" are
--- different events and this table cannot distinguish them, so the honest
--- version needs to decide which one it is reporting before it reports it.
-
 SELECT
-    country_code,
-    genre,
-    score,
-    previous_score,
-    delta
-FROM ranked
-WHERE rising_rank <= 25 OR falling_rank <= 25
-ORDER BY delta DESC;
+    r.country_code,
+    r.genre,
+    r.score,
+    r.previous_score,
+    ROUND(r.share, 2) AS share,
+    ROUND(r.previous_share, 2) AS previous_share,
+    ROUND(r.delta, 2) AS delta,
+    FORMAT_DATE('%Y-%m-%d', w.latest_date) AS snapshot_date,
+    FORMAT_DATE('%Y-%m-%d', w.baseline_date) AS previous_date
+FROM ranked r
+JOIN window_ends w ON w.country_code = r.country_code
+WHERE r.rising_rank <= 25 OR r.falling_rank <= 25
+ORDER BY r.delta DESC;

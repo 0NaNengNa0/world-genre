@@ -162,7 +162,13 @@ export type TrendingGenre = {
   genre: string
   score: number
   previous_score: number
+  /** Change in SHARE, in percentage points - not score minus previous_score. */
   delta: number
+  /** Optional: absent from payloads written before 2026-09-16. */
+  share?: number
+  previous_share?: number
+  snapshot_date?: string
+  previous_date?: string
 }
 
 export async function fetchTrendingGenres(): Promise<TrendingGenre[]> {

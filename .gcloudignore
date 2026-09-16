@@ -30,6 +30,10 @@ backend/airflow.db
 # Local tooling
 .git/
 .github/
+# Monitoring config is applied with gcloud, never built into an image.
+infra/
+# Stray duplicates of files that already exist at their proper paths.
+Claude outputs/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
