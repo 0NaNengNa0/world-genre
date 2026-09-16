@@ -50,6 +50,12 @@ PAUSE_BETWEEN_BATCHES = 1.0
 MAX_MUSICBRAINZ_PER_RUN = 250
 PACING_SLEEP = 1.5
 
+# How long a recorded miss stands before the artist is asked about again.
+# MusicBrainz gains artists constantly, so "not in MusicBrainz" is true on a
+# date rather than forever - but re-asking nightly is what made the backlog
+# grow instead of drain. 90 days spreads ~800 misses over ~9 requests a night.
+MISS_RECHECK_DAYS = 90
+
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger("run_extract_artist_meta")
 
@@ -71,38 +77,70 @@ def known_mbids() -> dict[str, str]:
 
 
 def pending_artists() -> list[str]:
-    """Unresolved artists, most-charted first.
+    """Artists still needing origin metadata, most-charted-recently first.
 
-    Ordering by chart presence means a truncated run resolves the artists that
-    actually carry streams, so domestic share becomes meaningful early rather
-    than only at full coverage. That matters because MusicBrainz's rate limit
-    caps how many any single run can get through.
+    Three clauses, each fixing a separate defect measured on 2026-09-16. The
+    design note is claude/enrichment-worklist-design.md in the project docs.
 
-    COUNT(c.artist_name) rather than Postgres's COUNT(c.*): BigQuery has no
-    row-wildcard count, and counting a column from the outer-joined side
-    correctly yields 0 for artists that never charted, which is the behaviour
-    the ordering depends on.
+    RECENT CHART PRESENCE, not lifetime. The ordering exists so a truncated run
+    resolves the artists that actually carry streams - MusicBrainz's rate limit
+    caps how many any single run gets through. Without a date filter it ranked
+    by everything that EVER charted, so a name that charted heavily in July and
+    not since outranked an artist on today's chart.
+
+    INNER JOIN, not LEFT. `artists` is a dimension: merge_dimension inserts and
+    updates, nothing ever deletes, so it grows forever by construction. 390 of
+    1,030 unresolved artists had not charted anywhere in three days - dead names
+    consuming a rate-limited budget every night. They stay in the table; they
+    just stop being worked on. Anything that iterates over a dimension needs a
+    reason to stop.
+
+    THE RE-CHECK CLAUSE is what makes recording a miss safe. "Never looked up"
+    and "looked up, found nothing" used to share one representation
+    (resolved_at IS NULL), so the only way to keep the second re-checkable was
+    to never record it - which is exactly the treadmill this fixes. Giving the
+    miss its own resolved_by value makes the policy expressible as a predicate:
+    a miss is a fact with an expiry date, not a permanent verdict.
+
+    Cost of the re-check: if ~800 artists settle as 'not_found', re-asking each
+    every 90 days averages ~9 requests a night against a budget of 250.
     """
     rows = run_query(
         f"""
-        SELECT a.artist_name, COUNT(c.artist_name) AS chart_rows
+        WITH recent AS (
+            SELECT artist_name, COUNT(*) AS chart_rows
+            FROM `{dataset_id()}.chart_entries`
+            WHERE snapshot_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)
+            GROUP BY artist_name
+        )
+        SELECT a.artist_name, r.chart_rows
         FROM `{dataset_id()}.artists` a
-        LEFT JOIN `{dataset_id()}.chart_entries` c
-          ON c.artist_name = a.artist_name
+        JOIN recent r ON r.artist_name = a.artist_name
         WHERE a.resolved_at IS NULL
-        GROUP BY a.artist_name
-        ORDER BY chart_rows DESC, a.artist_name
+           OR (
+                a.resolved_by = 'not_found'
+                AND a.resolved_at
+                    < TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {MISS_RECHECK_DAYS} DAY)
+           )
+        ORDER BY r.chart_rows DESC, a.artist_name
         """
     )
     return [r["artist_name"] for r in rows]
 
 
-def _row(name: str, mbid: str | None, meta: dict) -> dict:
+def _row(name: str, mbid: str | None, meta: dict, source: str) -> dict:
     """One resolved artist as a warehouse row.
 
     resolved_at is set even when the source knew nothing about the artist,
     which is what stops every later run retrying the same permanent misses -
     "looked up and found nothing" is a different state from "not looked up".
+    Until 2026-09-16 this docstring was the only place that was true: the
+    caller skipped misses entirely, so they were re-asked every night forever.
+
+    `source` lands in resolved_by alongside the warehouse join's own values
+    ('mb_dump_mbid', 'mb_dump_name'). That makes provenance queryable: how much
+    coverage came free from the mirror, how much cost a rate-limited request,
+    and how much is genuinely unknowable is a GROUP BY rather than an opinion.
     """
     return {
         "artist_name": name,
@@ -110,6 +148,7 @@ def _row(name: str, mbid: str | None, meta: dict) -> dict:
         "origin_country": meta.get("country"),
         "formed_year": meta.get("formed_year"),
         "resolved_at": _NOW,
+        "resolved_by": source,
     }
 
 
@@ -127,7 +166,13 @@ def _save(rows: list[dict]) -> None:
         "artists",
         "artist_name",
         rows,
-        update_columns=["mbid", "origin_country", "formed_year", "resolved_at"],
+        update_columns=[
+            "mbid",
+            "origin_country",
+            "formed_year",
+            "resolved_at",
+            "resolved_by",
+        ],
     )
 
 
@@ -137,22 +182,31 @@ def _chunks(items: list, size: int):
 
 
 def resolve_via_musicbrainz(name: str, mbid: str | None) -> tuple[str | None, dict]:
-    """(mbid, meta) for one artist. Sleeps between HTTP calls only."""
+    """(mbid, meta) for one artist. Sleeps between HTTP calls only.
+
+    RAISES requests.RequestException on a transport failure, deliberately.
+
+    It used to catch its own errors and return (None, {}) - the SAME value it
+    returns for a genuine miss, when MusicBrainz searched and has no such
+    artist. The caller could not tell them apart, assumed every (None, {}) was
+    a network blip, and skipped the row. So a permanent miss was never recorded
+    and was re-asked every night, forever, out of a 250-request budget. That is
+    why the backlog went 1,591 -> 1,602 across two full runs instead of down.
+
+    An overloaded sentinel is a bug the caller cannot recover from, because the
+    information was destroyed at the boundary. Exceptions are the channel for
+    "could not ask"; a return value is the channel for "asked, and here is the
+    answer" - including when the answer is nothing.
+    """
     if not mbid:
-        try:
-            mbid = musicbrainz.search_artist(name)
-        except requests.RequestException as e:
-            logger.warning("  search failed for %s, will retry next run: %s", name, e)
-            return None, {}
+        mbid = musicbrainz.search_artist(name)
         time.sleep(PACING_SLEEP)
         if not mbid:
+            # Asked and answered: MusicBrainz has no artist by this name. A
+            # result, not a failure - the caller records it.
             return None, {}
 
-    try:
-        meta = musicbrainz.get_artist_meta(mbid)
-    except requests.RequestException as e:
-        logger.warning("  lookup failed for %s, will retry next run: %s", name, e)
-        return mbid, {}
+    meta = musicbrainz.get_artist_meta(mbid)
     time.sleep(PACING_SLEEP)
     return mbid, meta
 
@@ -163,10 +217,13 @@ def main() -> None:
     pending = pending_artists()
 
     if not pending:
-        logger.info("Every artist already resolved - nothing to do.")
+        logger.info(
+            "Nothing to resolve: every recently-charting artist is resolved, "
+            "or no country has charted in the last 7 days."
+        )
         return
 
-    logger.info("%d artists unresolved", len(pending))
+    logger.info("%d recently-charting artists need resolving", len(pending))
     resolved: set[str] = set()
 
     # --- Pass 1: Wikidata by MusicBrainz id (exact) ---
@@ -182,7 +239,7 @@ def main() -> None:
                 continue
             for mbid, meta in found.items():
                 name = by_mbid[mbid]
-                rows.append(_row(name, mbid, meta))
+                rows.append(_row(name, mbid, meta, "wikidata_mbid"))
                 resolved.add(name)
             time.sleep(PAUSE_BETWEEN_BATCHES)
         _save(rows)
@@ -204,7 +261,7 @@ def main() -> None:
                 logger.warning("  wikidata name batch failed, skipping: %s", e)
                 continue
             for name, meta in found.items():
-                rows.append(_row(name, None, meta))
+                rows.append(_row(name, None, meta, "wikidata_name"))
                 resolved.add(name)
             time.sleep(PAUSE_BETWEEN_BATCHES)
         _save(rows)
@@ -224,19 +281,34 @@ def main() -> None:
             MAX_MUSICBRAINZ_PER_RUN,
         )
         rows = []
+        misses = 0
         for i, name in enumerate(remaining, 1):
-            mbid, meta = resolve_via_musicbrainz(name, lastfm_mbids.get(name))
-            if mbid is None and not meta:
-                # Network failure rather than a genuine miss - leave
-                # resolved_at NULL so the next run retries instead of
-                # recording a false blank.
+            try:
+                mbid, meta = resolve_via_musicbrainz(name, lastfm_mbids.get(name))
+            except requests.RequestException as e:
+                # Genuinely transient: leave resolved_at NULL so the next run
+                # retries rather than recording a false verdict.
+                logger.warning("  request failed for %s, will retry: %s", name, e)
                 continue
-            rows.append(_row(name, mbid, meta))
+            if mbid is None:
+                # Asked and answered. Recording this is the whole point: it is
+                # what stops the same unanswerable names consuming the budget
+                # every night. MISS_RECHECK_DAYS puts them back on the worklist
+                # eventually, so nothing is lost permanently.
+                misses += 1
+            rows.append(_row(name, mbid, meta, "api" if mbid else "not_found"))
             resolved.add(name)
             if i % 50 == 0:
                 logger.info("  %d/%d attempted", i, len(remaining))
         _save(rows)
-        logger.info("pass 3 (musicbrainz): %d resolved", len(rows))
+        logger.info(
+            "pass 3 (musicbrainz): %d looked up - %d found, %d recorded as "
+            "not_found (re-checked after %d days)",
+            len(rows),
+            len(rows) - misses,
+            misses,
+            MISS_RECHECK_DAYS,
+        )
 
     still_pending = len(pending) - len(resolved)
     logger.info(

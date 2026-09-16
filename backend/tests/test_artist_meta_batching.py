@@ -6,6 +6,8 @@ Wikidata queries answer the same question a few hundred artists at a time, so
 what's worth pinning here is the query construction (a bad escape breaks the
 whole batch, not one artist) and the ambiguity rule.
 """
+import pytest
+
 from app.services.extractors.wikidata import (
     build_meta_by_mbid_sparql,
     build_meta_by_name_sparql,
@@ -124,3 +126,100 @@ class TestParseByName:
             _binding(item="http://wikidata.org/Q9"),
         ]}}
         assert parse_meta_by_name(payload) == {}
+
+
+class TestAMissIsAResultNotAFailure:
+    """The enrichment treadmill, fixed 2026-09-16.
+
+    resolve_via_musicbrainz used to catch its own transport errors and return
+    (None, {}) - the SAME value it returns when MusicBrainz searched and has no
+    such artist. The caller could not tell them apart, assumed a network blip,
+    and skipped the row. A permanent miss was therefore never recorded and was
+    re-asked every night out of a 250-request budget, which is why the backlog
+    went 1,591 -> 1,602 across two full runs instead of down by 500.
+
+    An overloaded sentinel is a bug the caller cannot recover from: the
+    information was destroyed at the boundary. Exceptions are the channel for
+    "could not ask"; a return value is the channel for "asked, and here is the
+    answer" - including when the answer is nothing.
+    """
+
+    def test_a_transport_failure_raises(self, monkeypatch):
+        import requests
+
+        from scripts import run_extract_artist_meta as meta
+
+        def boom(name):
+            raise requests.RequestException("connection reset")
+
+        monkeypatch.setattr(meta.musicbrainz, "search_artist", boom)
+        with pytest.raises(requests.RequestException):
+            meta.resolve_via_musicbrainz("BTS", None)
+
+    def test_a_genuine_miss_returns_a_value(self, monkeypatch):
+        from scripts import run_extract_artist_meta as meta
+
+        monkeypatch.setattr(meta.musicbrainz, "search_artist", lambda name: None)
+        monkeypatch.setattr(meta.time, "sleep", lambda s: None)
+        assert meta.resolve_via_musicbrainz("Nobody At All", None) == (None, {})
+
+    def test_a_miss_is_recorded_as_looked_up(self):
+        from scripts.run_extract_artist_meta import _row
+
+        row = _row("Nobody At All", None, {}, "not_found")
+        # resolved_at set is what takes it off the worklist; resolved_by is
+        # what lets the re-check policy put it back after 90 days.
+        assert row["resolved_at"] is not None
+        assert row["resolved_by"] == "not_found"
+        assert row["origin_country"] is None
+
+    def test_provenance_distinguishes_the_paths(self):
+        from scripts.run_extract_artist_meta import _row
+
+        found = _row("BTS", "abc", {"country": "kr", "formed_year": 2013}, "api")
+        assert found["resolved_by"] == "api"
+        assert found["origin_country"] == "kr"
+
+
+class TestTheWorklistIsBounded:
+    """It asks for recently-charting artists, not the whole dimension.
+
+    `artists` only ever gains rows, so iterating over it is iterating over
+    everything that has ever charted. 390 of 1,030 unresolved artists had not
+    charted anywhere in three days and were still being re-queried nightly.
+
+    Asserted on the generated SQL rather than against BigQuery - there is no
+    emulator, and these three clauses are the whole design.
+    """
+
+    def _sql(self, monkeypatch):
+        from scripts import run_extract_artist_meta as meta
+
+        seen = {}
+        monkeypatch.setattr(meta, "dataset_id", lambda: "proj.ds")
+        monkeypatch.setattr(
+            meta, "run_query", lambda sql: seen.update(sql=sql) or []
+        )
+        meta.pending_artists()
+        return seen["sql"]
+
+    def test_joins_recent_chart_presence_rather_than_outer_joining(self, monkeypatch):
+        sql = self._sql(monkeypatch)
+        assert "JOIN recent r" in sql
+        assert "LEFT JOIN" not in sql
+
+    def test_orders_by_recent_rows_not_lifetime(self, monkeypatch):
+        sql = self._sql(monkeypatch)
+        assert "INTERVAL 7 DAY" in sql
+        assert "ORDER BY r.chart_rows DESC" in sql
+
+    def test_re_checks_expired_misses(self, monkeypatch):
+        # Without this clause, recording a miss would be a permanent verdict
+        # and an artist added to MusicBrainz later could never be picked up.
+        sql = self._sql(monkeypatch)
+        assert "resolved_by = 'not_found'" in sql
+        assert "INTERVAL 90 DAY" in sql
+
+    def test_still_includes_artists_never_looked_up(self, monkeypatch):
+        sql = self._sql(monkeypatch)
+        assert "a.resolved_at IS NULL" in sql
