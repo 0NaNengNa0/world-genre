@@ -82,9 +82,15 @@ jobs:
           cache-dependency-path: |
             backend/requirements.txt
             backend/requirements-cloud.txt
+            backend/requirements-dev.txt
 
+      # requirements-dev is here for sqlglot alone: run_check_schema.py parses
+      # the declared DDL with it, so for THIS job it is a runtime dependency
+      # rather than a test one. Installed via the requirements file instead of
+      # a bare `pip install sqlglot` so the version stays pinned in one place -
+      # a second, unpinned copy is how the two drift apart.
       - name: Install dependencies
-        run: pip install -r requirements.txt -r requirements-cloud.txt
+        run: pip install -r requirements.txt -r requirements-cloud.txt -r requirements-dev.txt
 
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2

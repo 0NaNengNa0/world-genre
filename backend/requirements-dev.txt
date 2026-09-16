@@ -1,5 +1,9 @@
-# Local dev + CI only. Never installed into the Airflow containers or
-# needed at runtime - just for running the test suite and linter.
+# Local dev + CI only. Never installed into the Airflow containers.
+#
+# Mostly not needed at runtime - but sqlglot IS, for scripts/run_check_schema.py,
+# which parses the declared DDL to compare it against INFORMATION_SCHEMA. The
+# deploy workflow's validate-sql job therefore installs this file, and a CI run
+# failed with exit 2 on 2026-09-16 when it did not.
 pytest>=8.0.0
 ruff>=0.6.0
 # ISO 3166-1 country names for scripts/generate_countries_seed.py. Dev-only
@@ -18,4 +22,9 @@ httpx>=0.27.0
 # Parses the BigQuery SQL offline so dialect errors fail in CI rather than
 # in a Cloud Run job. There is no local BigQuery emulator, so this is the
 # only way to check the .sql files without credentials and a network.
+#
+# Also a hard dependency of scripts/run_check_schema.py, which is an
+# operational script rather than a test - see the note at the top of this file.
+# It fails with an actionable message naming this file rather than an
+# ImportError, which is how the missing install was diagnosed in one line.
 sqlglot>=25.0.0
