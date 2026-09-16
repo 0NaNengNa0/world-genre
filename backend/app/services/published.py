@@ -81,6 +81,20 @@ def get_country_summaries() -> list[dict] | None:
     return payload["countries"] if payload else None
 
 
+def get_publish_meta() -> dict | None:
+    """The payload's as-of dates, or None for a file published before they existed.
+
+    Read from countries.json rather than its own file on purpose: the meta
+    describes THAT payload, so travelling with it is what keeps the two from
+    disagreeing. A separate meta.json could be refreshed while the data was
+    not, which is precisely the lie a freshness indicator must not tell.
+    """
+    payload = _read("countries.json")
+    if not payload:
+        return None
+    return payload.get("meta")
+
+
 def get_country_detail(code: str) -> dict | None:
     return _read(f"country/{code}.json")
 

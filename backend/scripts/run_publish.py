@@ -29,6 +29,7 @@ import json
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 
 from app.core.bq import dataset_id, run_query
 from app.core.config import DATA_DIR, SQL_DIR
@@ -359,12 +360,65 @@ def _write(root, relative: str, payload) -> None:
     path.write_text(json.dumps(payload, default=str), encoding="utf-8")
 
 
+def build_meta() -> dict:
+    """As-of dates for the payload: what the reader needs to judge staleness.
+
+    THREE FIELDS, TWO LINEAGES, and they go stale independently:
+
+      snapshot_date   the newest chart day in the warehouse. Advances nightly.
+      mb_imported_at  when the MusicBrainz mirror was last imported. A one-off
+                      snapshot today (see backend-map gap 5), so it can be
+                      weeks behind while charts are current - which is exactly
+                      the kind of divergence a single "last updated" line hides.
+      published_at    when this payload was assembled.
+
+    published_at is carried but NOT rendered in the UI. It only differs from
+    snapshot_date when the pipeline is running while the data is not advancing,
+    and that is an operator question already answered properly by the two Cloud
+    Monitoring policies. Putting it in a user-facing footer would be telemetry
+    in the wrong place; putting it in the JSON costs nothing and helps anyone
+    reading the API directly.
+
+    One query, two scalar sub-selects: both are metadata-cheap MAX() reads on a
+    clustered column and a tiny dimension, so this is not worth two round trips.
+
+    Timestamps are isoformat()'d explicitly rather than left to _write's
+    `default=str`. str(datetime) yields "2026-09-16 17:56:23+00:00" with a
+    space, which is not ISO-8601 and which Date.parse is only incidentally
+    willing to accept. A DATE needs no such help: str(date) is already
+    YYYY-MM-DD.
+    """
+    rows = run_query(
+        f"""
+        SELECT
+          (SELECT MAX(snapshot_date) FROM `{dataset_id()}.chart_entries`)
+              AS snapshot_date,
+          (SELECT MAX(imported_at) FROM `{dataset_id()}.mb_artists`)
+              AS mb_imported_at
+        """
+    )
+    row = rows[0] if rows else {}
+    imported = row.get("mb_imported_at")
+    snapshot = row.get("snapshot_date")
+    return {
+        "snapshot_date": snapshot.isoformat() if snapshot else None,
+        "mb_imported_at": imported.isoformat() if imported else None,
+        "published_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 def main() -> None:
     root = publish_dir()
     logger.info("Publishing to %s", root)
 
+    meta = build_meta()
     summaries = build_summaries()
-    _write(root, "countries.json", {"countries": summaries})
+    _write(root, "countries.json", {"countries": summaries, "meta": meta})
+    logger.info(
+        "meta: charts %s, musicbrainz mirror %s",
+        meta["snapshot_date"],
+        meta["mb_imported_at"],
+    )
     logger.info("countries.json: %d countries", len(summaries))
 
     # Genre descriptions are reference data - identical for every country - so

@@ -11,6 +11,7 @@ from app.schemas.countries import (
     CountryDetail,
     GenreDetail,
     GlobalArtistsResponse,
+    PublishMeta,
 )
 from app.services import published
 
@@ -28,7 +29,13 @@ def list_countries() -> CountriesResponse:
     summaries = published.get_country_summaries()
     if summaries is None:
         raise HTTPException(status_code=503, detail=_NOT_PUBLISHED)
-    return CountriesResponse(countries=summaries)
+    # Absent for any payload published before build_meta existed, which is
+    # every payload until the next pipeline run after this deploys.
+    raw_meta = published.get_publish_meta()
+    return CountriesResponse(
+        countries=summaries,
+        meta=PublishMeta(**raw_meta) if raw_meta else None,
+    )
 
 
 @router.get("/artists/global", response_model=GlobalArtistsResponse)

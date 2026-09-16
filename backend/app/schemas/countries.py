@@ -35,8 +35,24 @@ class CountrySummary(BaseModel):
     cover_image: str | None = None
 
 
+class PublishMeta(BaseModel):
+    """As-of dates for the served payload.
+
+    Every field is optional, and that is load-bearing rather than lazy: the API
+    serves whatever countries.json is currently in the bucket, and a file
+    published before this existed has no meta at all. Requiring any of these
+    would turn a routine deploy into a 500 for every request until the next
+    pipeline run.
+    """
+
+    snapshot_date: str | None = None
+    mb_imported_at: str | None = None
+    published_at: str | None = None
+
+
 class CountriesResponse(BaseModel):
     countries: list[CountrySummary]
+    meta: PublishMeta | None = None
 
 
 class GenreScore(BaseModel):

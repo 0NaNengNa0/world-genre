@@ -241,3 +241,55 @@ class TestFrontendServing:
         # Handing index.html back for a missing .js makes the browser try to
         # parse HTML as JavaScript - a needlessly confusing failure.
         assert with_frontend.get("/assets/missing.js").status_code == 404
+
+
+class TestPublishMeta:
+    """The as-of dates the frontend footer renders.
+
+    The case that matters most is the one where they are ABSENT. Deploying this
+    change does not republish anything - the API keeps serving whatever
+    countries.json is already in the bucket, and that file has no meta until the
+    next nightly run. If the field were required, the deploy itself would turn
+    every request into a 500 for up to 24 hours.
+    """
+
+    def test_meta_is_served_when_present(self, publish_root):
+        write(
+            publish_root,
+            "countries.json",
+            {
+                "countries": [SUMMARY],
+                "meta": {
+                    "snapshot_date": "2026-09-16",
+                    "mb_imported_at": "2026-09-05T00:00:00+00:00",
+                    "published_at": "2026-09-17T01:30:00+00:00",
+                },
+            },
+        )
+        body = TestClient(app).get("/api/countries").json()
+        assert body["meta"]["snapshot_date"] == "2026-09-16"
+        assert body["meta"]["mb_imported_at"] == "2026-09-05T00:00:00+00:00"
+
+    def test_payload_without_meta_still_serves(self, publish_root):
+        """A file published before build_meta existed. This is the deploy state."""
+        write(publish_root, "countries.json", {"countries": [SUMMARY]})
+        response = TestClient(app).get("/api/countries")
+        assert response.status_code == 200
+        assert response.json()["meta"] is None
+        assert len(response.json()["countries"]) == 1
+
+    def test_partial_meta_does_not_fail(self, publish_root):
+        """mb_artists can be empty - the dump import is a one-off that may not
+        have run. A missing mirror date must not cost the chart date."""
+        write(
+            publish_root,
+            "countries.json",
+            {
+                "countries": [SUMMARY],
+                "meta": {"snapshot_date": "2026-09-16", "mb_imported_at": None},
+            },
+        )
+        body = TestClient(app).get("/api/countries").json()
+        assert body["meta"]["snapshot_date"] == "2026-09-16"
+        assert body["meta"]["mb_imported_at"] is None
+        assert body["meta"]["published_at"] is None

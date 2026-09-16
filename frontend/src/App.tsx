@@ -1,6 +1,10 @@
 import { useEffect, useState } from 'react'
 
-import { fetchCountries, type CountrySummary } from './api/countries'
+import {
+  fetchCountries,
+  type CountrySummary,
+  type PublishMeta,
+} from './api/countries'
 import { ComparePanel } from './components/ComparePanel'
 import { CountryCard } from './components/CountryCard'
 import { CountryDetailModal } from './components/CountryDetailModal'
@@ -27,6 +31,31 @@ const COLOR_MODES: { id: ColorMode; label: string }[] = [
   { id: 'none', label: 'Plain' },
 ]
 
+/**
+ * "16 Sep 2026" from either a YYYY-MM-DD date or a full ISO timestamp, or null
+ * if the value is missing or unparseable.
+ *
+ * timeZone: 'UTC' is not cosmetic. `new Date('2026-09-16')` is parsed as UTC
+ * midnight, so formatting it in any timezone west of Greenwich renders the
+ * PREVIOUS day - a freshness indicator that is silently off by one for a third
+ * of the world. snapshot_date is a UTC calendar date, so it is displayed as
+ * one.
+ *
+ * Returning null rather than a placeholder lets the caller drop the whole line
+ * instead of showing "Charts as of Invalid Date".
+ */
+function formatAsOf(value: string | null | undefined): string | null {
+  if (!value) return null
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) return null
+  return parsed.toLocaleDateString('en-GB', {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+    timeZone: 'UTC',
+  })
+}
+
 function App() {
   const [status, setStatus] = useState<Status>('loading')
   const [countries, setCountries] = useState<CountrySummary[]>([])
@@ -37,6 +66,9 @@ function App() {
   // only then does `detailOpen` pull the heavier per-country breakdown.
   const [selected, setSelected] = useState<CountrySummary | null>(null)
   const [detailOpen, setDetailOpen] = useState(false)
+  // Null until the first payload lands, and stays null for any payload
+  // published before build_meta existed.
+  const [meta, setMeta] = useState<PublishMeta | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -44,7 +76,8 @@ function App() {
     fetchCountries()
       .then((data) => {
         if (cancelled) return
-        setCountries(data)
+        setCountries(data.countries)
+        setMeta(data.meta ?? null)
         setStatus('ready')
       })
       .catch((err: Error) => {
@@ -57,6 +90,12 @@ function App() {
       cancelled = true
     }
   }, [])
+
+  // Two lineages, shown separately: chart data advances nightly, the
+  // MusicBrainz mirror is a one-off import that can be weeks behind. Collapsing
+  // them into one "last updated" would hide exactly that divergence.
+  const chartsAsOf = formatAsOf(meta?.snapshot_date)
+  const mirrorAsOf = formatAsOf(meta?.mb_imported_at)
 
   const closeAll = () => {
     setSelected(null)
@@ -153,6 +192,14 @@ function App() {
       {status === 'ready' && view === 'trending' && <TrendingPanel countries={countries} />}
       {status === 'ready' && view === 'artists' && <GlobalArtistsPanel />}
       {status === 'ready' && view === 'compare' && <ComparePanel countries={countries} />}
+
+      {status === 'ready' && (chartsAsOf || mirrorAsOf) && (
+        <footer className="page__footer">
+          {chartsAsOf && <span>Charts as of {chartsAsOf}</span>}
+          {chartsAsOf && mirrorAsOf && <span aria-hidden="true"> &middot; </span>}
+          {mirrorAsOf && <span>MusicBrainz mirror {mirrorAsOf}</span>}
+        </footer>
+      )}
 
       {selected && detailOpen && (
         <CountryDetailModal

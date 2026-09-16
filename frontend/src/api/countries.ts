@@ -180,17 +180,42 @@ export async function fetchTrendingGenres(): Promise<TrendingGenre[]> {
   return data.genres
 }
 
-type CountriesResponse = {
-  countries: CountrySummary[]
+/**
+ * As-of dates for the payload the API just served.
+ *
+ * Every field is optional because the API serves whichever countries.json is
+ * currently in the bucket, and a file published before this existed carries no
+ * meta. That is not a hypothetical: it is the state between deploying this and
+ * the next nightly publish. Anything rendering these must tolerate all three
+ * being absent.
+ */
+export type PublishMeta = {
+  /** Newest chart day in the warehouse, YYYY-MM-DD. */
+  snapshot_date: string | null
+  /** When the MusicBrainz mirror was last imported, ISO-8601. A one-off
+   *  snapshot today, so it can be weeks behind while charts are current. */
+  mb_imported_at: string | null
+  /** When this payload was assembled. Carried for anyone reading the API
+   *  directly; deliberately not rendered - see build_meta in run_publish.py. */
+  published_at: string | null
 }
 
-export async function fetchCountries(): Promise<CountrySummary[]> {
+export type CountriesResponse = {
+  countries: CountrySummary[]
+  meta: PublishMeta | null
+}
+
+/**
+ * Returns the whole response rather than just the list, because the meta
+ * describes that exact payload. Fetching it separately would allow the two to
+ * disagree, which is the one thing a freshness indicator must never do.
+ */
+export async function fetchCountries(): Promise<CountriesResponse> {
   const response = await fetch(apiUrl('/api/countries'))
   if (!response.ok) {
     throw new Error(`Failed to fetch countries (${response.status})`)
   }
-  const data = (await response.json()) as CountriesResponse
-  return data.countries
+  return (await response.json()) as CountriesResponse
 }
 
 export async function fetchCountryDetail(code: string): Promise<CountryDetail> {
