@@ -1,14 +1,30 @@
 /* Design tokens — a single place for colors, spacing, radius, type.
    Change one variable, the whole app updates. */
 :root {
-  --bg: #0b0b10;
-  --surface: #15151d;
-  --surface-2: #1e1e2a;
-  --border: #2a2a38;
-  --text: #f1f1f3;
-  --text-muted: #9a9aa8;
-  --accent: #7c5cff;
-  --accent-soft: #7c5cff22;
+  /* Monochrome. The greys carry a faint blue cast (#0a0a0c, not #0a0a0a)
+     because a perfectly neutral dark grey reads slightly green on most LCD
+     panels next to white text. */
+  --bg: #0a0a0c;
+  --surface: #141416;
+  --surface-2: #1d1d20;
+  --border: #2e2e32;
+  --text: #f2f2f3;
+  --text-muted: #9b9b9f;
+  /* TWO accent tokens, because one cannot do both jobs in a monochrome scheme.
+     --accent is everything that must be SEEN against a near-black surface:
+     focus rings, links, stat values, map hover fills. Making that dark grey
+     would make three :focus-visible outlines invisible, which is an
+     accessibility regression, not a style choice. */
+  --accent: #e4e4e7;
+  --accent-soft: #e4e4e714;
+  /* --accent-fill is the dark grey used where accent is a BACKGROUND: the
+     active toggle, the popup button, the active legend row. Dark enough to
+     read as a pressed state against --surface, light enough to separate from
+     --border. */
+  --accent-fill: #3f3f47;
+  /* Text on --accent-fill. Light, because the fill is now dark - these rules
+     hardcoded #fff when the accent was purple. */
+  --accent-on: #f2f2f3;
 
   --radius: 14px;
   --radius-sm: 8px;
@@ -453,8 +469,8 @@ ul {
 }
 
 .toggle__btn--on {
-  background: var(--accent);
-  color: #fff;
+  background: var(--accent-fill);
+  color: var(--accent-on);
 }
 
 .toggle__btn:focus-visible {
@@ -671,8 +687,8 @@ ul {
 .popup__more {
   margin-top: var(--gap-lg);
   width: 100%;
-  background: var(--accent);
-  color: #fff;
+  background: var(--accent-fill);
+  color: var(--accent-on);
   border: none;
   border-radius: var(--radius-sm);
   padding: 0.55rem 0.75rem;
@@ -940,14 +956,18 @@ ul {
 
 /* Positive gap = higher in country A, negative = higher in B. Two colours
    rather than one, so the direction is readable without doing the maths. */
+/* Direction is now carried by LIGHTNESS rather than hue, because the palette
+   is monochrome. This is genuinely weaker than two hues - if it turns out to
+   be hard to read at a glance, add an explicit + / - or an arrow rather than
+   reintroducing a colour. */
 .diff__left {
-  color: #7c5cff;
+  color: var(--text);
   font-variant-numeric: tabular-nums;
   font-weight: 600;
 }
 
 .diff__right {
-  color: #14b8a6;
+  color: var(--text-muted);
   font-variant-numeric: tabular-nums;
   font-weight: 600;
 }
@@ -1152,4 +1172,31 @@ ul {
   font-variant-numeric: tabular-nums;
   text-align: right;
   color: var(--text-muted);
+}
+
+/* Typewriter caret for the rotating headline. `steps(1, end)` gives a hard
+   on/off blink rather than a fade - a caret that eases is a glow, not a
+   cursor. currentColor so it inherits whichever line it sits on. */
+.type-cursor {
+  display: inline-block;
+  width: 0.08em;
+  height: 1em;
+  margin-left: 0.08em;
+  vertical-align: -0.12em;
+  background: currentColor;
+  animation: type-blink 1.05s steps(1, end) infinite;
+}
+
+@keyframes type-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+/* The typing itself is skipped in JS under this setting; this stops the caret
+   blinking in the event one is ever rendered statically. */
+@media (prefers-reduced-motion: reduce) {
+  .type-cursor {
+    animation: none;
+  }
 }

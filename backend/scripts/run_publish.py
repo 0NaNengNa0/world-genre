@@ -413,6 +413,27 @@ def main() -> None:
 
     meta = build_meta()
     summaries = build_summaries()
+    # Cover images resolve from DATA_DIR/raw/{deezer,wikidata}/artists.json at
+    # publish time. images.py returns an EMPTY MAPPING when those files are
+    # absent rather than raising, so a DATA_DIR pointing anywhere without them
+    # publishes cover_image: null for every country and looks like a successful
+    # run. That happened on 2026-09-16 from a manual publish with PUBLISH_DIR
+    # set and DATA_DIR left at its local default. Silently writing nulls over a
+    # populated field is worse than failing, so it gets said out loud.
+    with_cover = sum(1 for s in summaries if s.get("cover_image"))
+    if not with_cover:
+        logger.warning(
+            "No cover images resolved for ANY of %d countries. That usually "
+            "means DATA_DIR does not point at the bucket holding "
+            "raw/deezer/artists.json - check it before treating this publish "
+            "as good.",
+            len(summaries),
+        )
+    else:
+        logger.info(
+            "cover images: %d/%d countries", with_cover, len(summaries)
+        )
+
     _write(root, "countries.json", {"countries": summaries, "meta": meta})
     logger.info(
         "meta: charts %s, musicbrainz mirror %s",

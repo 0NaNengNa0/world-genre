@@ -32,6 +32,42 @@ const COLOR_MODES: { id: ColorMode; label: string }[] = [
 ]
 
 /**
+ * Fonts the headline cycles through, one every ROTATE_MS.
+ *
+ * System stacks rather than a webfont CDN, on purpose: six Google Fonts would
+ * be six network requests plus a layout shift on every swap, to decorate two
+ * lines of text. Every stack below ends in a generic family, so a machine
+ * missing the first choice still lands somewhere deliberate instead of falling
+ * back to the body font and making the rotation look broken.
+ */
+const HEADLINE_FONTS = [
+  'ui-serif, Georgia, "Times New Roman", serif',
+  'ui-monospace, "Cascadia Code", Consolas, "Courier New", monospace',
+  '"Trebuchet MS", "Segoe UI", system-ui, sans-serif',
+  '"Arial Black", Impact, sans-serif',
+  'Verdana, Geneva, sans-serif',
+  '"Palatino Linotype", "Book Antiqua", Palatino, serif',
+]
+
+const TITLE = 'World Genre'
+const SUBTITLE = 'The sound of the charts, country by country.'
+
+// One counter drives both lines: the title consumes the first TITLE.length
+// steps, the subtitle the rest. That is what makes them type SEQUENTIALLY at
+// one speed. Two independent counters would finish at different times because
+// the strings are different lengths, which reads as two animations fighting
+// rather than one typewriter.
+const TOTAL_CHARS = TITLE.length + SUBTITLE.length
+const TYPE_MS = 45
+const CYCLE_MS = 10_000
+
+// Read once. The rotation is decorative motion, so under this setting it does
+// not run at all - the headline simply renders complete in the default font.
+const PREFERS_REDUCED_MOTION =
+  typeof window !== 'undefined' &&
+  window.matchMedia('(prefers-reduced-motion: reduce)').matches
+
+/**
  * "16 Sep 2026" from either a YYYY-MM-DD date or a full ISO timestamp, or null
  * if the value is missing or unparseable.
  *
@@ -69,6 +105,12 @@ function App() {
   // Null until the first payload lands, and stays null for any payload
   // published before build_meta existed.
   const [meta, setMeta] = useState<PublishMeta | null>(null)
+  const [fontIndex, setFontIndex] = useState(0)
+  const [cycle, setCycle] = useState(0)
+  // Starts COMPLETE, not empty: the first paint should show the finished
+  // headline rather than animating in, which would delay the page's own title
+  // behind an effect.
+  const [typed, setTyped] = useState(TOTAL_CHARS)
 
   useEffect(() => {
     let cancelled = false
@@ -91,6 +133,47 @@ function App() {
     }
   }, [])
 
+  // Tick the cycle every CYCLE_MS. Kept separate from the typing effect below
+  // so the cadence stays exactly 10s regardless of how long typing takes.
+  useEffect(() => {
+    if (PREFERS_REDUCED_MOTION) return
+    const id = window.setInterval(() => setCycle((c) => c + 1), CYCLE_MS)
+    return () => window.clearInterval(id)
+  }, [])
+
+  // Each new cycle: pick a different font, then retype from nothing.
+  useEffect(() => {
+    if (PREFERS_REDUCED_MOTION || cycle === 0) return
+
+    setFontIndex((current) => {
+      // A random STEP of 1..n-1 rather than a random index, so the next font is
+      // uniformly chosen among the others and can never repeat the current one.
+      // The obvious `while (next === current)` version has no guaranteed
+      // termination; this has no loop at all.
+      const step = 1 + Math.floor(Math.random() * (HEADLINE_FONTS.length - 1))
+      return (current + step) % HEADLINE_FONTS.length
+    })
+
+    setTyped(0)
+    // A local counter rather than a functional setState that clears its own
+    // interval: the cleanup below is then the only place the timer is stopped,
+    // so a cycle change mid-type cannot leave one running.
+    let n = 0
+    const id = window.setInterval(() => {
+      n += 1
+      setTyped(n)
+      if (n >= TOTAL_CHARS) window.clearInterval(id)
+    }, TYPE_MS)
+
+    return () => window.clearInterval(id)
+  }, [cycle])
+
+  const headlineFont = HEADLINE_FONTS[fontIndex]
+  const typedTitle = TITLE.slice(0, Math.min(typed, TITLE.length))
+  const typedSubtitle = SUBTITLE.slice(0, Math.max(0, typed - TITLE.length))
+  const titleTyping = typed < TITLE.length
+  const subtitleTyping = typed >= TITLE.length && typed < TOTAL_CHARS
+
   // Two lineages, shown separately: chart data advances nightly, the
   // MusicBrainz mirror is a one-off import that can be weeks behind. Collapsing
   // them into one "last updated" would hide exactly that divergence.
@@ -107,9 +190,15 @@ function App() {
       <header className="page__header">
         <div className="page__headline">
           <div>
-            <h1 className="page__title">World Genre</h1>
-            <p className="page__subtitle">
-              The sound of the charts, country by country.
+            {/* Non-breaking space when a line is empty: an empty h1 collapses
+                to zero height and shunts the whole page up on every cycle. */}
+            <h1 className="page__title" style={{ fontFamily: headlineFont }}>
+              {typedTitle || '\u00A0'}
+              {titleTyping && <span className="type-cursor" aria-hidden="true" />}
+            </h1>
+            <p className="page__subtitle" style={{ fontFamily: headlineFont }}>
+              {typedSubtitle || '\u00A0'}
+              {subtitleTyping && <span className="type-cursor" aria-hidden="true" />}
             </p>
           </div>
 
