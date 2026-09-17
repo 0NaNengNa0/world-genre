@@ -15,6 +15,8 @@ Commands are PowerShell.
 | Serving mart | `gs://world-genre-serving/published` |
 | Image | `asia-southeast3-docker.pkg.dev/world-genre-natt/world-genre/api` |
 | Service | `world-genre-api`, Cloud Run |
+| Pipeline identity | `411464225527-compute@developer.gserviceaccount.com` — `bigquery.dataEditor` + `jobUser` (it writes) |
+| Deploy identity | `github-deployer@world-genre-natt.iam.gserviceaccount.com` — `bigquery.jobUser` + `bigquery.dataViewer` (**no write access, deliberately**) |
 
 **Keep everything in one region.** Reads within a region are free; reads across
 regions bill as egress on every request.
@@ -155,6 +157,34 @@ $env:BQ_DATASET = "world-genre-natt.world_genre"
 ..\.venv\Scripts\python.exe -m scripts.run_validate
 ..\.venv\Scripts\python.exe -m scripts.run_publish
 ```
+
+> **Running any of this against PRODUCTION needs three environment variables,
+> not one.** `BQ_DATASET` alone leaves `DATA_DIR` and `PUBLISH_DIR` at their
+> local defaults, and the failure is silent rather than loud:
+>
+> ```powershell
+> $env:BQ_DATASET  = "world-genre-natt.world_genre"
+> $env:DATA_DIR    = "gs://world_genre_bucket/data"
+> $env:PUBLISH_DIR = "gs://world-genre-serving/published"
+> ```
+>
+> `run_publish` resolves each country's `cover_image` through
+> `app/services/images.py`, which reads
+> `DATA_DIR/raw/{deezer,wikidata}/artists.json` and returns an **empty mapping**
+> when those files are absent instead of raising. So a `DATA_DIR` pointing at an
+> empty local folder publishes `cover_image: null` for all 76 countries and logs
+> a clean, successful run. That happened on 2026-09-16 and wiped every artist
+> photo from the live site.
+>
+> Two lines to check in the output, both added afterwards for this reason:
+>
+> ```
+> INFO Publishing to gs://world-genre-serving/published
+> INFO cover images: 76/76 countries
+> ```
+>
+> If the first names a local path, the env var did not take. If the second says
+> `0/76`, `run_publish` now warns loudly rather than letting it pass.
 
 `run_validate` exits non-zero when a blocking check fails, which is what stops
 the chain before `run_publish`. There are two kinds of non-zero, and the
@@ -385,6 +415,57 @@ filters: a frontend-only commit never runs Backend CI, so `workflow_run` never
 fires and that commit silently never deploys. `backend-ci.yml`'s push trigger
 now ignores `main`, since the deploy workflow already runs it there.
 
+### The SQL gate — `validate-sql`
+
+`deploy-api.yml` has a third job that runs in parallel with the tests and gates
+the deploy. Two steps:
+
+- `python -m scripts.run_validate_sql` — submits every query, check and merge to
+  BigQuery as a **dry run**: parsed, name-resolved and type-checked against the
+  live dataset, executed never, billed never.
+- `python -m scripts.run_check_schema` — compares `schema.sql` against
+  `INFORMATION_SCHEMA` for columns, types, nullability, partitioning and
+  clustering.
+
+It is deliberately **not** in `backend-ci.yml`: that workflow is offline and
+credential-free so the PR loop stays fast and works from a fork.
+
+**A dry run is free in bytes, not in permissions.** It performs the full
+authorization check and skips only execution, so:
+
+| statement | needs |
+| --- | --- |
+| `SELECT` | `bigquery.tables.getData` |
+| `CREATE TABLE` | `bigquery.tables.create` — a **write** |
+| `MERGE` | `bigquery.tables.updateData` — a **write** |
+
+Granting write permission to an identity whose whole job is to never write is
+the wrong trade, so CI sets `VALIDATE_SQL_READ_ONLY=1`, which skips the 15
+schema statements and the merge and validates the 17 read-only ones. Those
+writers stay covered: sqlglot parses them offline in `tests/test_bigquery_sql.py`,
+`run_init_bq` and `run_resolve_artists` execute them nightly under the pipeline's
+own account, and `run_check_schema` compares declared-vs-actual using metadata
+alone. Locally, where you are project owner, everything is validated.
+
+The deployer needs exactly this and nothing more:
+
+```powershell
+gcloud projects add-iam-policy-binding world-genre-natt `
+  --member="serviceAccount:github-deployer@world-genre-natt.iam.gserviceaccount.com" `
+  --role="roles/bigquery.jobUser"
+gcloud projects add-iam-policy-binding world-genre-natt `
+  --member="serviceAccount:github-deployer@world-genre-natt.iam.gserviceaccount.com" `
+  --role="roles/bigquery.dataViewer"
+```
+
+`run_check_schema` also needs `sqlglot`, which lives in `requirements-dev.txt` —
+so the job installs `requirements.txt` + `requirements-cloud.txt` +
+`requirements-dev.txt`. Omitting the last one fails with exit code 2 ("could not
+run"), not 1 ("SQL is wrong"), which is the distinction that makes the failure
+readable.
+
+Full account of how this was got wrong three times: `claude/dry-run-permissions-2026-09-16.md`.
+
 ### Authentication
 
 **Workload Identity Federation, not a service account key.** GitHub mints a
@@ -550,7 +631,7 @@ wrong. What actually exists:
 
 | Resource | Value |
 | --- | --- |
-| Cloud Scheduler job | `world-genre-weekly`, **location `asia-southeast1`** |
+| Cloud Scheduler job | `world-genre-daily`, **location `asia-southeast1`** (renamed 2026-09-16; `world-genre-weekly` is PAUSED pending deletion — see below) |
 | Schedule | `0 0 * * *`, time zone `Asia/Bangkok` → 17:00 UTC daily |
 | Target | POST to `…/jobs/world-genre-pipeline:run` in `asia-southeast3` |
 | Cloud Run Job | `world-genre-pipeline`, `asia-southeast3`, 1 CPU / 1 GiB |
@@ -573,6 +654,32 @@ invites the conclusion that nothing is scheduled.
 The job carries **no `command` and no `args`** — it runs the image's default
 entrypoint, which is `scripts/run_pipeline.py`. One execution, all twelve
 stages, about 36 minutes.
+
+### The rename, 2026-09-16 (finish this)
+
+The job was called `world-genre-weekly` and ran daily. A Cloud Scheduler job's
+name is its resource id, so renaming means create-new + delete-old.
+
+`world-genre-daily` was created and verified field-for-field against the old job
+— uri, service account, schedule, time zone, `attemptDeadline`, `retryConfig`
+and headers all identical. `world-genre-weekly` was **paused first**, so at no
+point were both enabled: two enabled jobs means two executions colliding on the
+shared `_staging_*` tables.
+
+**Still outstanding.** Delete the old job only after a confirmed successful run
+under the new name:
+
+```powershell
+gcloud scheduler jobs describe world-genre-daily --location=asia-southeast1 `
+  --format="value(state,lastAttemptTime)"
+gcloud run jobs executions list --job=world-genre-pipeline --region=asia-southeast3 --limit=2 `
+  --format="table(name, createTime, status.succeededCount, status.failedCount)"
+
+# only after that shows a successful execution:
+gcloud scheduler jobs delete world-genre-weekly --location=asia-southeast1
+```
+
+The paused job costs nothing and is the rollback until then.
 
 ### The recovered sequence
 
@@ -719,10 +826,27 @@ an error that names the wrong thing:
 | `bq`: `Syntax error: Unexpected end of script` | Only the first line of a multi-line argument is passed. Flatten: `($q -replace "\r?\n", " ")` |
 | Cloud Run: `No module named ' scripts'` | Comma treated as the array operator. Quote the whole value: `--args="-m,scripts.run_load"` |
 | `gcloud logging read`: `Unparseable filter … token ':'` | Embedded double quotes stripped, so a timestamp's colons break the filter. Filter client-side, or escape the inner quotes |
+| `gcloud`: `unrecognized arguments: 20260917022632` | `$obj.field` and `(Get-Date …)` do **not** expand inside a bare argument — PowerShell passes the result as a *separate* arg. Assign to a plain variable first, or use `"$($obj.field)"` |
+| `The '<' operator is reserved for future use` | A `<PLACEHOLDER>` left in a pasted command. `<` is a redirection operator; substitute the real value before pasting |
+| `git status`: "You are currently rebasing" that never ends | A stale **empty** `.git/rebase-apply/` from an interrupted rebase. Git checks whether the directory exists, not whether it holds anything. `Remove-Item -Recurse -Force .git\rebase-apply` once verified empty — never `git rebase --abort`, which resets to a start point that no longer exists. It also blocks the next `git pull --rebase` |
 
 ---
 
 ## Monitoring — CONFIGURED, NOT YET APPLIED
+
+> **Status disputed as of 2026-09-17.** `claude/backend-map.md` lists
+> `infra/monitoring` as deployed; this heading says it is not. One of them is
+> wrong and nobody has run a command to find out. Settle it before trusting
+> either:
+>
+> ```powershell
+> gcloud alpha monitoring policies list --format="table(displayName,enabled)"
+> ```
+>
+> (needs the `alpha` and `beta` components — without them the command returns
+> empty stdout, which reads like "no policies" rather than "could not run".)
+> Then set this heading to match reality. Nothing here gets marked DEPLOYED
+> until a command has actually succeeded.
 
 Config, reasoning and the apply script live in `infra/monitoring/`. Read its
 README before changing a threshold; the short version is here.
